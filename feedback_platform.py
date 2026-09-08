@@ -35,7 +35,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import faiss
 import numpy as np
@@ -65,6 +65,11 @@ log = logging.getLogger("feedback_platform")
 # environment / .env with the PRODRION_ prefix. See .env.example.
 
 
+def _utc_now_iso() -> str:
+    """Timezone-aware UTC timestamp in ISO-8601 (e.g. 2026-01-01T00:00:00+00:00)."""
+    return datetime.now(timezone.utc).isoformat()
+
+
 # =============================================================================
 # ENGINE 0: DATABASE LAYER
 # =============================================================================
@@ -76,16 +81,31 @@ CREATE TABLE IF NOT EXISTS feedback (
     user_id     TEXT,
     user_email  TEXT,
     source      TEXT NOT NULL,
+    external_id TEXT,                      -- stable id from the source, for dedup
     timestamp   TEXT NOT NULL,
     raw_meta    TEXT,
-    labels      TEXT,
+    labels      TEXT,                      -- JSON array (kept for raw views)
     arr         REAL DEFAULT 0,
     plan_type   TEXT,
     jira_ticket TEXT,
     jira_status TEXT,
     embedding   BLOB,
+    embed_model TEXT,                      -- provider/model that produced `embedding`
     created_at  TEXT DEFAULT (datetime('now'))
 );
+
+-- Idempotency: one row per (source, external_id) when the source gives us an id.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_feedback_source_ext
+    ON feedback(source, external_id) WHERE external_id IS NOT NULL;
+
+-- Normalised labels: one row per (feedback, label) for correct per-node rollups.
+CREATE TABLE IF NOT EXISTS feedback_labels (
+    feedback_id TEXT NOT NULL,
+    label       TEXT NOT NULL,
+    PRIMARY KEY (feedback_id, label),
+    FOREIGN KEY (feedback_id) REFERENCES feedback(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS ix_feedback_labels_label ON feedback_labels(label);
 
 CREATE TABLE IF NOT EXISTS taxonomy (
     id          TEXT PRIMARY KEY,
@@ -102,8 +122,10 @@ CREATE TABLE IF NOT EXISTS jira_tickets (
     summary     TEXT NOT NULL,
     status      TEXT,
     embedding   BLOB,
+    embed_model TEXT,
     updated_at  TEXT DEFAULT (datetime('now'))
 );
+CREATE UNIQUE INDEX IF NOT EXISTS ux_jira_tickets_key ON jira_tickets(key);
 
 CREATE TABLE IF NOT EXISTS users (
     email       TEXT PRIMARY KEY,
@@ -112,17 +134,56 @@ CREATE TABLE IF NOT EXISTS users (
     plan_type   TEXT,
     company     TEXT
 );
+
+-- Per-source ingestion high-water mark (e.g. last seen created_at / ts).
+CREATE TABLE IF NOT EXISTS sync_state (
+    source     TEXT PRIMARY KEY,
+    cursor     TEXT,
+    updated_at TEXT DEFAULT (datetime('now'))
+);
 """
+
+# Columns added after the original prototype schema — applied to pre-existing
+# databases by _migrate().
+_ADDED_COLUMNS = {
+    "feedback": [("external_id", "TEXT"), ("embed_model", "TEXT")],
+    "jira_tickets": [("embed_model", "TEXT")],
+}
 
 
 def get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(settings.db_path, check_same_thread=False)
+    timeout = settings.sqlite_busy_timeout_seconds
+    conn = sqlite3.connect(settings.db_path, check_same_thread=False, timeout=timeout)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(f"PRAGMA busy_timeout={int(timeout * 1000)}")
+    conn.execute("PRAGMA foreign_keys=ON")
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add columns introduced after the prototype schema to pre-existing tables.
+
+    Runs before the schema script so the CREATE INDEX statements that reference
+    the new columns succeed on an upgraded database.
+    """
+    tables = {
+        row["name"]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    for table, columns in _ADDED_COLUMNS.items():
+        if table not in tables:
+            continue
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for name, decl in columns:
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+                log.info("Migrated: added %s.%s", table, name)
 
 
 def init_db():
     with get_conn() as conn:
+        _migrate(conn)
         conn.executescript(DB_SCHEMA)
     log.info("Database initialized.")
 
@@ -174,7 +235,7 @@ class StandardFeedbackObject:
     user_id:    str = ""
     user_email: str = ""
     source:     str = ""          # "zendesk" | "app_store" | "play_store" | "slack" | "webhook"
-    timestamp:  str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    timestamp:  str = field(default_factory=lambda: _utc_now_iso())
     raw_meta:   dict = field(default_factory=dict)   # ← full original payload preserved
     labels:     list[str] = field(default_factory=list)
     arr:        float = 0.0
@@ -194,7 +255,7 @@ class Normalizer:
             user_id=str(requester.get("id", "")),
             user_email=requester.get("email", ""),
             source="zendesk",
-            timestamp=ticket.get("created_at", datetime.utcnow().isoformat()),
+            timestamp=ticket.get("created_at", _utc_now_iso()),
             raw_meta=ticket,
         )
 
@@ -205,7 +266,7 @@ class Normalizer:
             user_id=str(review.get("userName", "")),
             user_email="",
             source="app_store",
-            timestamp=review.get("date", datetime.utcnow().isoformat()),
+            timestamp=review.get("date", _utc_now_iso()),
             raw_meta=review,
         )
 
@@ -216,7 +277,7 @@ class Normalizer:
             user_id=str(review.get("userName", "")),
             user_email="",
             source="play_store",
-            timestamp=review.get("at", datetime.utcnow().isoformat()),
+            timestamp=review.get("at", _utc_now_iso()),
             raw_meta=review,
         )
 
@@ -227,8 +288,8 @@ class Normalizer:
             user_id=event.get("user", ""),
             user_email="",
             source="slack",
-            timestamp=datetime.utcfromtimestamp(
-                float(event.get("ts", time.time()))
+            timestamp=datetime.fromtimestamp(
+                float(event.get("ts", time.time())), timezone.utc
             ).isoformat(),
             raw_meta=event,
         )
@@ -248,7 +309,7 @@ class Normalizer:
             user_id=str(payload.get("user_id", payload.get("userId", ""))),
             user_email=payload.get("email", payload.get("user_email", "")),
             source=payload.get("source", "webhook"),
-            timestamp=payload.get("timestamp", datetime.utcnow().isoformat()),
+            timestamp=payload.get("timestamp", _utc_now_iso()),
             raw_meta=payload,
         )
 
@@ -285,7 +346,7 @@ def poll_zendesk():
     if not all([settings.zendesk_url, settings.zendesk_email, settings.zendesk_token]):
         log.debug("Zendesk not configured, skipping poll.")
         return
-    since = (datetime.utcnow() - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    since = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
     url = f"{settings.zendesk_url}/api/v2/tickets.json?sort_by=created_at&sort_order=desc"
     try:
         resp = requests.get(
@@ -1033,7 +1094,7 @@ def check_velocity_spikes():
     Fires a Slack alert if volume doubles or more.
     """
     log.info("Checking velocity spikes...")
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     week_ago  = (now - timedelta(days=7)).isoformat()
     two_weeks = (now - timedelta(days=14)).isoformat()
 

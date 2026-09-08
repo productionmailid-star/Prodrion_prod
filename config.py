@@ -46,6 +46,8 @@ class Settings(BaseSettings):
     api_host: str = "127.0.0.1"  # set to 0.0.0.0 in production, behind a proxy
     api_port: int = 8000
     db_path: str = "feedback_platform.db"
+    # How long a writer waits for a competing lock before "database is locked".
+    sqlite_busy_timeout_seconds: float = Field(5.0, gt=0.0)
 
     # ---- API security ----
     # Bearer token for the admin/query endpoints. Required in production.
