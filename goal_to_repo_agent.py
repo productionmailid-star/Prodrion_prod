@@ -27,22 +27,21 @@ from collections import Counter
 
 import requests
 
+from config import settings
+
 # ── Config ───────────────────────────────────────────────────────────────────
+# All values come from config.Settings (PRODRION_* env / .env).
 
-API_URL        = "http://localhost:8000"   # Feedback platform
-OLLAMA_URL     = "http://localhost:11434/api/generate"
-OLLAMA_MODEL   = "llama3.2:latest"
-REPO_AGENT_URL = "http://localhost:7845"   # repo_agent_server.py
-
-# Only process clusters with at least this many feedback items
-MIN_CLUSTER_SIZE = 2
+API_URL          = settings.feedback_api_url
+REPO_AGENT_URL   = settings.repo_agent_url
+MIN_CLUSTER_SIZE = settings.goal_min_cluster_size
 
 # ── Ollama call ───────────────────────────────────────────────────────────────
 
 def call_ollama(prompt: str) -> str:
     resp = requests.post(
-        OLLAMA_URL,
-        json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False},
+        settings.ollama_url,
+        json={"model": settings.ollama_model, "prompt": prompt, "stream": False},
         timeout=120,
     )
     resp.raise_for_status()

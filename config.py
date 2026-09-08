@@ -1,0 +1,129 @@
+"""Central runtime configuration for Prodrion.
+
+Every tunable value and secret is defined here as a field on :class:`Settings`
+and read from the environment (or a local ``.env`` file) with the prefix
+``PRODRION_``. See ``.env.example`` for the full list.
+
+Import the shared instance:
+
+    from config import settings
+
+In production (``PRODRION_ENVIRONMENT=production``) the configuration is
+validated on load and the process refuses to start on an incoherent setup
+(demo data enabled, or an integration URL set without its credentials).
+"""
+
+from __future__ import annotations
+
+from enum import Enum
+from functools import lru_cache
+
+from pydantic import Field, field_validator, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Environment(str, Enum):
+    development = "development"
+    production = "production"
+    test = "test"
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_prefix="PRODRION_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+    environment: Environment = Environment.development
+
+    # ---- Core API service ----
+    api_host: str = "127.0.0.1"  # set to 0.0.0.0 in production, behind a proxy
+    api_port: int = 8000
+    db_path: str = "feedback_platform.db"
+
+    # ---- LLM / embeddings (Ollama today; hosted API arrives in milestone 2) ----
+    ollama_url: str = "http://localhost:11434/api/generate"
+    ollama_model: str = "llama3.2:latest"
+    embed_model: str = "BAAI/bge-small-en"
+
+    # ---- Tuning knobs ----
+    similarity_threshold: float = Field(0.85, ge=0.0, le=1.0)
+    velocity_spike_mult: float = Field(2.0, gt=0.0)
+    drift_min_cluster_size: int = Field(3, ge=2)
+
+    # ---- Demo / bootstrap ----
+    load_demo_data: bool = False
+    # Product docs / help-centre URL used to auto-build the taxonomy when empty.
+    taxonomy_bootstrap_url: str = ""
+
+    # ---- Slack ----
+    slack_bot_token: str = ""
+    slack_alert_channel: str = "#alerts"
+
+    # ---- Zendesk ----
+    zendesk_url: str = ""
+    zendesk_email: str = ""
+    zendesk_token: str = ""
+
+    # ---- App Store / Play Store ----
+    app_store_app_id: str = ""
+    play_store_app_id: str = ""
+
+    # ---- Jira ----
+    jira_url: str = ""
+    jira_email: str = ""
+    jira_token: str = ""
+    jira_project: str = "PROJ"
+
+    # ---- HubSpot ----
+    hubspot_api_key: str = ""
+
+    # ---- Feedback -> goal -> repo-agent connector ----
+    feedback_api_url: str = "http://localhost:8000"
+    repo_agent_url: str = "http://localhost:7845"
+    goal_min_cluster_size: int = Field(2, ge=1)
+
+    @property
+    def is_production(self) -> bool:
+        return self.environment is Environment.production
+
+    @field_validator(
+        "taxonomy_bootstrap_url", "zendesk_url", "jira_url", "feedback_api_url", "repo_agent_url"
+    )
+    @classmethod
+    def _blank_or_http_url(cls, value: str) -> str:
+        value = value.strip()
+        if value and not value.startswith(("http://", "https://")):
+            raise ValueError("must be blank or an http(s) URL")
+        return value.rstrip("/")
+
+    @model_validator(mode="after")
+    def _validate_production_coherence(self) -> Settings:
+        if not self.is_production:
+            return self
+
+        problems: list[str] = []
+        if self.load_demo_data:
+            problems.append("PRODRION_LOAD_DEMO_DATA must be false in production")
+        if self.zendesk_url and not (self.zendesk_email and self.zendesk_token):
+            problems.append(
+                "PRODRION_ZENDESK_URL is set but ZENDESK_EMAIL/ZENDESK_TOKEN are missing"
+            )
+        if self.jira_url and not (self.jira_email and self.jira_token):
+            problems.append("PRODRION_JIRA_URL is set but JIRA_EMAIL/JIRA_TOKEN are missing")
+
+        if problems:
+            raise ValueError("Incoherent production configuration: " + "; ".join(problems))
+        return self
+
+
+@lru_cache
+def get_settings() -> Settings:
+    """Return the process-wide Settings instance (cached)."""
+    return Settings()
+
+
+settings = get_settings()

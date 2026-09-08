@@ -50,30 +50,16 @@ from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException, Request
 from sentence_transformers import SentenceTransformer
 
+from config import settings
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 log = logging.getLogger("feedback_platform")
 
 # =============================================================================
-# CONFIG  (edit these or use environment variables)
+# CONFIG
 # =============================================================================
-
-OLLAMA_URL     = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
-OLLAMA_MODEL   = os.getenv("OLLAMA_MODEL", "llama3.2:latest")
-DB_PATH        = os.getenv("DB_PATH", "feedback_platform.db")
-EMBED_MODEL    = os.getenv("EMBED_MODEL", "BAAI/bge-small-en")
-SLACK_TOKEN    = os.getenv("SLACK_BOT_TOKEN", "")          # xoxb-...
-SLACK_ALERT_CH = os.getenv("SLACK_ALERT_CHANNEL", "#alerts")
-ZENDESK_URL    = os.getenv("ZENDESK_URL", "")              # https://yourco.zendesk.com
-ZENDESK_EMAIL  = os.getenv("ZENDESK_EMAIL", "")
-ZENDESK_TOKEN  = os.getenv("ZENDESK_TOKEN", "")
-APP_STORE_ID   = os.getenv("APP_STORE_APP_ID", "")         # e.g. "1234567890"
-PLAY_STORE_ID  = os.getenv("PLAY_STORE_APP_ID", "")        # e.g. "com.example.app"
-JIRA_URL       = os.getenv("JIRA_URL", "")                 # https://yourco.atlassian.net
-JIRA_EMAIL     = os.getenv("JIRA_EMAIL", "")
-JIRA_TOKEN     = os.getenv("JIRA_TOKEN", "")
-JIRA_PROJECT   = os.getenv("JIRA_PROJECT", "PROJ")
-SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD", "0.85"))
-VELOCITY_SPIKE_MULT  = float(os.getenv("VELOCITY_SPIKE_MULT", "2.0"))
+# All runtime configuration lives in config.Settings, loaded from the
+# environment / .env with the PRODRION_ prefix. See .env.example.
 
 
 # =============================================================================
@@ -127,7 +113,7 @@ CREATE TABLE IF NOT EXISTS users (
 
 
 def get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(settings.db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -147,8 +133,8 @@ class EmbeddingEngine:
     _lock = threading.Lock()
 
     def __init__(self):
-        log.info(f"Loading embedding model: {EMBED_MODEL}")
-        self.model = SentenceTransformer(EMBED_MODEL)
+        log.info(f"Loading embedding model: {settings.embed_model}")
+        self.model = SentenceTransformer(settings.embed_model)
 
     @classmethod
     def get(cls) -> EmbeddingEngine:
@@ -289,15 +275,15 @@ def save_feedback(fb: StandardFeedbackObject):
 
 def poll_zendesk():
     """Fetch new Zendesk tickets from the last hour."""
-    if not all([ZENDESK_URL, ZENDESK_EMAIL, ZENDESK_TOKEN]):
+    if not all([settings.zendesk_url, settings.zendesk_email, settings.zendesk_token]):
         log.debug("Zendesk not configured, skipping poll.")
         return
     since = (datetime.utcnow() - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    url = f"{ZENDESK_URL}/api/v2/tickets.json?sort_by=created_at&sort_order=desc"
+    url = f"{settings.zendesk_url}/api/v2/tickets.json?sort_by=created_at&sort_order=desc"
     try:
         resp = requests.get(
             url,
-            auth=(f"{ZENDESK_EMAIL}/token", ZENDESK_TOKEN),
+            auth=(f"{settings.zendesk_email}/token", settings.zendesk_token),
             timeout=30,
         )
         resp.raise_for_status()
@@ -315,11 +301,11 @@ def poll_zendesk():
 
 def poll_app_store():
     """Fetch recent iOS App Store reviews."""
-    if not APP_STORE_ID:
+    if not settings.app_store_app_id:
         return
     try:
         from app_store_scraper import AppStore  # pip install app-store-scraper
-        app = AppStore(country="us", app_name="", app_id=APP_STORE_ID)
+        app = AppStore(country="us", app_name="", app_id=settings.app_store_app_id)
         app.review(how_many=50)
         for review in app.reviews:
             fb = Normalizer.from_app_store(review)
@@ -333,11 +319,13 @@ def poll_app_store():
 
 def poll_play_store():
     """Fetch recent Google Play reviews."""
-    if not PLAY_STORE_ID:
+    if not settings.play_store_app_id:
         return
     try:
         from google_play_scraper import Sort, reviews  # pip install google-play-scraper
-        result, _ = reviews(PLAY_STORE_ID, lang="en", country="us", sort=Sort.NEWEST, count=50)
+        result, _ = reviews(
+            settings.play_store_app_id, lang="en", country="us", sort=Sort.NEWEST, count=50
+        )
         for review in result:
             fb = Normalizer.from_play_store(review)
             pipeline(fb)
@@ -350,11 +338,11 @@ def poll_play_store():
 
 def poll_slack_channel(channel_id: str):
     """Fetch recent messages from a Slack channel."""
-    if not SLACK_TOKEN:
+    if not settings.slack_bot_token:
         return
     try:
         from slack_sdk import WebClient  # pip install slack_sdk
-        client = WebClient(token=SLACK_TOKEN)
+        client = WebClient(token=settings.slack_bot_token)
         oldest = str(time.time() - 3600)
         result = client.conversations_history(channel=channel_id, oldest=oldest)
         messages = result.get("messages", [])
@@ -378,8 +366,8 @@ def call_ollama(prompt: str, expect_json: bool = False) -> str:
     """Call local Ollama LLM. Falls back to empty string on failure."""
     try:
         resp = requests.post(
-            OLLAMA_URL,
-            json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False},
+            settings.ollama_url,
+            json={"model": settings.ollama_model, "prompt": prompt, "stream": False},
             timeout=300,
         )
         resp.raise_for_status()
@@ -606,7 +594,9 @@ def detect_taxonomy_drift():
     )
 
     # HDBSCAN clustering — fully unsupervised, finds arbitrary cluster shapes
-    clusterer = hdbscan.HDBSCAN(min_cluster_size=3, metric="euclidean")
+    clusterer = hdbscan.HDBSCAN(
+        min_cluster_size=settings.drift_min_cluster_size, metric="euclidean"
+    )
     labels = clusterer.fit_predict(embeddings)
     unique_clusters = set(labels) - {-1}  # -1 = noise
 
@@ -696,7 +686,7 @@ def sync_hubspot_contacts():
     Uses HubSpot's free public API (no paid plan required for basic contact properties).
     Set env: HUBSPOT_API_KEY
     """
-    api_key = os.getenv("HUBSPOT_API_KEY", "")
+    api_key = settings.hubspot_api_key
     if not api_key:
         log.debug("HubSpot not configured, skipping CRM sync.")
         return
@@ -837,18 +827,24 @@ def sync_jira_tickets():
     Fetch In Progress + Backlog tickets from Jira, embed them, store in SQLite.
     Linear users: swap for Linear GraphQL API (also free).
     """
-    if not all([JIRA_URL, JIRA_EMAIL, JIRA_TOKEN]):
-        log.debug("Jira not configured, loading demo tickets.")
-        _load_demo_tickets()
+    if not all([settings.jira_url, settings.jira_email, settings.jira_token]):
+        if settings.load_demo_data:
+            log.info("Jira not configured — loading demo tickets (PRODRION_LOAD_DEMO_DATA=true).")
+            _load_demo_tickets()
+        else:
+            log.info("Jira not configured — skipping ticket sync.")
         return
 
-    jql = f"project={JIRA_PROJECT} AND status in ('In Progress','Backlog') ORDER BY updated DESC"
-    url = f"{JIRA_URL}/rest/api/3/search"
+    jql = (
+        f"project={settings.jira_project} "
+        "AND status in ('In Progress','Backlog') ORDER BY updated DESC"
+    )
+    url = f"{settings.jira_url}/rest/api/3/search"
     try:
         resp = requests.get(
             url,
             params={"jql": jql, "maxResults": 200, "fields": "summary,status"},
-            auth=(JIRA_EMAIL, JIRA_TOKEN),
+            auth=(settings.jira_email, settings.jira_token),
             timeout=30,
         )
         resp.raise_for_status()
@@ -895,14 +891,14 @@ def _load_demo_tickets():
 
 def match_to_jira(fb: StandardFeedbackObject) -> StandardFeedbackObject:
     """
-    If cosine similarity > SIMILARITY_THRESHOLD, auto-link feedback to Jira ticket.
+    If cosine similarity > settings.similarity_threshold, auto-link feedback to a Jira ticket.
     """
     if not fb.text:
         return fb
     vec = EmbeddingEngine.get().encode_one(fb.text)
     matches = VECTOR_STORE.search(vec, k=3)
     for jira_key, score in matches:
-        if score >= SIMILARITY_THRESHOLD:
+        if score >= settings.similarity_threshold:
             with get_conn() as conn:
                 row = conn.execute(
                     "SELECT status FROM jira_tickets WHERE key=?", (jira_key,)
@@ -922,13 +918,13 @@ def match_to_jira(fb: StandardFeedbackObject) -> StandardFeedbackObject:
 
 def send_slack_alert(message: str):
     """Send a Slack message using the free Slack Bot Token."""
-    if not SLACK_TOKEN:
+    if not settings.slack_bot_token:
         log.info(f"[Slack alert - not configured]: {message}")
         return
     try:
         from slack_sdk import WebClient
-        client = WebClient(token=SLACK_TOKEN)
-        client.chat_postMessage(channel=SLACK_ALERT_CH, text=message)
+        client = WebClient(token=settings.slack_bot_token)
+        client.chat_postMessage(channel=settings.slack_alert_channel, text=message)
     except ImportError:
         log.warning("slack_sdk not installed.")
     except Exception as e:
@@ -1035,7 +1031,7 @@ def check_velocity_spikes():
         if last_cnt == 0:
             continue   # skip brand-new labels (no baseline)
 
-        if this_cnt >= last_cnt * VELOCITY_SPIKE_MULT:
+        if this_cnt >= last_cnt * settings.velocity_spike_mult:
             try:
                 label_display = ", ".join(json.loads(label_key))
             except Exception:
@@ -1060,26 +1056,23 @@ def taxonomy_exists() -> bool:
 
 def auto_bootstrap_taxonomy_if_needed(source: str):
     """
-    Automatically bootstrap taxonomy once.
-    Runs only if taxonomy table is empty.
+    Build the taxonomy once, from the configured product docs URL, when the
+    taxonomy table is empty. Does nothing if PRODRION_TAXONOMY_BOOTSTRAP_URL
+    is not set.
     """
-
     if taxonomy_exists():
         return
 
-    log.info("Taxonomy empty → auto bootstrapping")
+    if not settings.taxonomy_bootstrap_url:
+        log.info(
+            "Taxonomy empty and PRODRION_TAXONOMY_BOOTSTRAP_URL not set "
+            "— skipping auto-bootstrap (triggered by source=%s).",
+            source,
+        )
+        return
 
-    # map sources → product URLs
-    SOURCE_URL_MAP = {
-        "github": "https://plausible.io",
-        "webhook": "https://plausible.io",
-        "slack": "https://plausible.io",
-    }
-
-    url = SOURCE_URL_MAP.get(source)
-
-    if url:
-        bootstrap_taxonomy_from_url(url)
+    log.info("Taxonomy empty → auto-bootstrapping from %s", settings.taxonomy_bootstrap_url)
+    bootstrap_taxonomy_from_url(settings.taxonomy_bootstrap_url)
 
 # =============================================================================
 # THE PIPELINE: Wire all engines together
@@ -1184,8 +1177,8 @@ async def health():
         "status": "ok",
         "feedback_count": feedback_count,
         "jira_tickets_indexed": ticket_count,
-        "ollama_url": OLLAMA_URL,
-        "model": OLLAMA_MODEL,
+        "ollama_url": settings.ollama_url,
+        "model": settings.ollama_model,
     }
 
 
@@ -1253,8 +1246,8 @@ async def on_startup():
 if __name__ == "__main__":
     uvicorn.run(
         "feedback_platform:app",
-        host="0.0.0.0",
-        port=8000,
+        host=settings.api_host,
+        port=settings.api_port,
         reload=False,
         log_level="info",
     )

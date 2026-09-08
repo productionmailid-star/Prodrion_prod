@@ -2,6 +2,9 @@
 fastapi>=0.111.0
 uvicorn[standard]>=0.29.0
 
+# Configuration (typed settings from env / .env)
+pydantic-settings>=2.0.0
+
 # Scheduler (replaces cron)
 apscheduler>=3.10.0
 
