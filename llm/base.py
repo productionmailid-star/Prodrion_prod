@@ -39,6 +39,10 @@ class LLMProvider(ABC):
 class Embedder(ABC):
     """Vector embeddings."""
 
+    #: Identifier of the model producing the vectors, stored alongside each
+    #: persisted embedding so a provider/model switch can be detected.
+    model_name: str = "unknown"
+
     @abstractmethod
     def embed(self, texts: list[str]) -> list[list[float]]:
         """Return one embedding vector per input text, order preserved."""

@@ -47,6 +47,10 @@ Deployment constraints that shape every recommendation:
 
 ## P2 — Medium
 
+> Status: 2.1, 2.3, 2.4, 2.10 addressed in milestone 4; 2.2 partially (Zendesk
+> requester/subject fallbacks, stable external ids per source — full contract
+> tests against recorded API responses still pending). 2.5–2.9 outstanding.
+
 | ID | Issue | Fix type |
 | --- | --- | --- |
 | 2.1 | Revenue ranking + velocity detection `GROUP BY` the raw `labels` JSON string, so multi-label rows fragment and per-node scoring is wrong. | quick fix |

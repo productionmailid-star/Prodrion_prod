@@ -38,6 +38,7 @@ class GeminiEmbedder(Embedder):
 
         self._client = genai.Client(api_key=api_key)
         self._model = model
+        self.model_name = f"gemini:{model}"
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         if not texts:

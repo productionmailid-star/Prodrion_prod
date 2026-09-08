@@ -22,6 +22,8 @@ class FakeLLM(LLMProvider):
 class FakeEmbedder(Embedder):
     """Hash-derived pseudo-vectors: deterministic, cheap, no network."""
 
+    model_name = "fake"
+
     def __init__(self, dim: int = 16):
         self.dim = dim
 

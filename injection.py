@@ -1,3 +1,5 @@
+import os
+
 import requests
 
 REPO = "plausible/analytics"
@@ -12,7 +14,13 @@ for issue in issues:
         "text": text,
         "user_id": issue["user"]["login"],
         "source": "github",
-        "timestamp": issue["created_at"]
+        "external_id": str(issue["number"]),  # stable id -> re-runs are idempotent
+        "timestamp": issue["created_at"],
     }
 
-    requests.post("http://localhost:8000/webhook/feedback", json=payload)
+    requests.post(
+        "http://localhost:8000/webhook/feedback",
+        json=payload,
+        headers={"X-Webhook-Secret": os.environ.get("PRODRION_WEBHOOK_SECRET", "")},
+        timeout=30,
+    )

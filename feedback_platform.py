@@ -27,6 +27,7 @@ Run:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -188,6 +189,28 @@ def init_db():
     log.info("Database initialized.")
 
 
+def get_sync_cursor(source: str) -> str | None:
+    """Return the stored high-water mark for a polling source, or None."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT cursor FROM sync_state WHERE source = ?", (source,)
+        ).fetchone()
+    return row["cursor"] if row else None
+
+
+def set_sync_cursor(source: str, cursor: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO sync_state (source, cursor, updated_at)
+            VALUES (?, ?, datetime('now'))
+            ON CONFLICT(source) DO UPDATE SET
+              cursor = excluded.cursor, updated_at = datetime('now')
+            """,
+            (source, cursor),
+        )
+
+
 # =============================================================================
 # ENGINE 0B: EMBEDDING SINGLETON
 # =============================================================================
@@ -213,6 +236,10 @@ class EmbeddingEngine:
                     cls._instance = cls()
         return cls._instance
 
+    @property
+    def model_name(self) -> str:
+        return getattr(self._embedder, "model_name", "unknown")
+
     def encode(self, texts: list[str]) -> np.ndarray:
         return np.array(self._embedder.embed(texts), dtype="float32")
 
@@ -235,6 +262,7 @@ class StandardFeedbackObject:
     user_id:    str = ""
     user_email: str = ""
     source:     str = ""          # "zendesk" | "app_store" | "play_store" | "slack" | "webhook"
+    external_id: str = ""         # stable id from the source; enables dedup on re-poll
     timestamp:  str = field(default_factory=lambda: _utc_now_iso())
     raw_meta:   dict = field(default_factory=dict)   # ← full original payload preserved
     labels:     list[str] = field(default_factory=list)
@@ -244,59 +272,85 @@ class StandardFeedbackObject:
     jira_status: str = ""
 
 
+def _stable_external_id(*parts: object) -> str:
+    """Deterministic id for sources that don't provide one (hash of parts)."""
+    joined = "|".join("" if p is None else str(p) for p in parts)
+    return hashlib.sha1(joined.encode("utf-8")).hexdigest()
+
+
 class Normalizer:
     """Converts raw source payloads → StandardFeedbackObject."""
 
     @staticmethod
     def from_zendesk(ticket: dict) -> StandardFeedbackObject:
+        # The Zendesk list API returns requester_id, not an inline requester
+        # object; the full requester (with email) needs a side-load. We keep
+        # both lookups so either shape works.
         requester = ticket.get("requester", {})
+        email = requester.get("email", "") or ticket.get("requester_email", "")
+        uid = requester.get("id", "") or ticket.get("requester_id", "")
         return StandardFeedbackObject(
-            text=ticket.get("description", ""),
-            user_id=str(requester.get("id", "")),
-            user_email=requester.get("email", ""),
+            text=ticket.get("description", "") or ticket.get("subject", ""),
+            user_id=str(uid or ""),
+            user_email=email,
             source="zendesk",
+            external_id=str(ticket.get("id", "")),
             timestamp=ticket.get("created_at", _utc_now_iso()),
             raw_meta=ticket,
         )
 
     @staticmethod
     def from_app_store(review: dict) -> StandardFeedbackObject:
+        ext = review.get("review_id") or review.get("id") or _stable_external_id(
+            review.get("userName"), review.get("date"), review.get("title")
+        )
         return StandardFeedbackObject(
             text=f"{review.get('title', '')} {review.get('content', '')}".strip(),
             user_id=str(review.get("userName", "")),
             user_email="",
             source="app_store",
+            external_id=str(ext),
             timestamp=review.get("date", _utc_now_iso()),
             raw_meta=review,
         )
 
     @staticmethod
     def from_play_store(review: dict) -> StandardFeedbackObject:
+        ext = review.get("reviewId") or _stable_external_id(
+            review.get("userName"), review.get("at"), review.get("content")
+        )
         return StandardFeedbackObject(
             text=review.get("content", ""),
             user_id=str(review.get("userName", "")),
             user_email="",
             source="play_store",
+            external_id=str(ext),
             timestamp=review.get("at", _utc_now_iso()),
             raw_meta=review,
         )
 
     @staticmethod
     def from_slack(event: dict) -> StandardFeedbackObject:
+        ts = event.get("ts", "")
         return StandardFeedbackObject(
             text=event.get("text", ""),
             user_id=event.get("user", ""),
             user_email="",
             source="slack",
+            external_id=str(event.get("client_msg_id") or ts),
             timestamp=datetime.fromtimestamp(
-                float(event.get("ts", time.time())), timezone.utc
+                float(ts or time.time()), timezone.utc
             ).isoformat(),
             raw_meta=event,
         )
 
     @staticmethod
     def from_webhook(payload: dict) -> StandardFeedbackObject:
-        """Generic webhook — maps common field names automatically."""
+        """Generic webhook — maps common field names automatically.
+
+        Senders that want re-delivery to be idempotent should include an
+        ``id`` / ``external_id`` field.
+        """
         text = (
             payload.get("text") or
             payload.get("message") or
@@ -309,44 +363,92 @@ class Normalizer:
             user_id=str(payload.get("user_id", payload.get("userId", ""))),
             user_email=payload.get("email", payload.get("user_email", "")),
             source=payload.get("source", "webhook"),
+            external_id=str(payload.get("id") or payload.get("external_id") or ""),
             timestamp=payload.get("timestamp", _utc_now_iso()),
             raw_meta=payload,
         )
 
 
+def _feedback_exists(conn: sqlite3.Connection, source: str, external_id: str) -> str | None:
+    row = conn.execute(
+        "SELECT id FROM feedback WHERE source = ? AND external_id = ?",
+        (source, external_id),
+    ).fetchone()
+    return row["id"] if row else None
+
+
 def save_feedback(fb: StandardFeedbackObject):
-    """Persist a StandardFeedbackObject to the database."""
-    embedding = EmbeddingEngine.get().encode_one(fb.text)
+    """Persist a StandardFeedbackObject.
+
+    Idempotent when the source provided an external_id: a re-poll of the same
+    item is skipped before the (paid) embedding call.
+    """
+    external_id = fb.external_id or None
+
     with get_conn() as conn:
-        conn.execute(
+        if external_id is not None:
+            existing = _feedback_exists(conn, fb.source, external_id)
+            if existing:
+                log.info(
+                    "Skipping duplicate feedback [%s] external_id=%s (id=%s)",
+                    fb.source, external_id, existing,
+                )
+                fb.id = existing
+                return fb
+
+        embedder = EmbeddingEngine.get()
+        embedding = embedder.encode_one(fb.text)
+
+        cur = conn.execute(
             """
-            INSERT OR REPLACE INTO feedback
-              (id, text, user_id, user_email, source, timestamp,
-               raw_meta, labels, arr, plan_type, jira_ticket, jira_status, embedding)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+            INSERT INTO feedback
+              (id, text, user_id, user_email, source, external_id, timestamp,
+               raw_meta, labels, arr, plan_type, jira_ticket, jira_status,
+               embedding, embed_model)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(source, external_id) WHERE external_id IS NOT NULL
+            DO NOTHING
             """,
             (
                 fb.id, fb.text, fb.user_id, fb.user_email,
-                fb.source, fb.timestamp,
+                fb.source, external_id, fb.timestamp,
                 json.dumps(fb.raw_meta),
                 json.dumps(fb.labels),
                 fb.arr, fb.plan_type,
                 fb.jira_ticket, fb.jira_status,
-                embedding.tobytes(),
+                embedding.tobytes(), embedder.model_name,
             ),
         )
-    log.info(f"Saved feedback [{fb.source}] id={fb.id}")
+        if cur.rowcount == 1:
+            _replace_labels(conn, fb.id, fb.labels)
+        else:  # lost a concurrent insert race; the winner owns the label rows
+            log.info(
+                "Concurrent insert raced for %s external_id=%s; not re-labelling.",
+                fb.source, external_id,
+            )
+
+    log.info("Saved feedback [%s] id=%s", fb.source, fb.id)
     return fb
+
+
+def _replace_labels(conn: sqlite3.Connection, feedback_id: str, labels: list[str]) -> None:
+    conn.execute("DELETE FROM feedback_labels WHERE feedback_id = ?", (feedback_id,))
+    conn.executemany(
+        "INSERT OR IGNORE INTO feedback_labels (feedback_id, label) VALUES (?, ?)",
+        [(feedback_id, label) for label in labels if label],
+    )
 
 
 # ---- Component A: Polling Services ----------------------------------------
 
 def poll_zendesk():
-    """Fetch new Zendesk tickets from the last hour."""
+    """Fetch Zendesk tickets created since the stored high-water mark."""
     if not all([settings.zendesk_url, settings.zendesk_email, settings.zendesk_token]):
         log.debug("Zendesk not configured, skipping poll.")
         return
-    since = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    since = get_sync_cursor("zendesk") or (
+        datetime.now(timezone.utc) - timedelta(hours=1)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
     url = f"{settings.zendesk_url}/api/v2/tickets.json?sort_by=created_at&sort_order=desc"
     try:
         resp = requests.get(
@@ -357,12 +459,16 @@ def poll_zendesk():
         resp.raise_for_status()
         tickets = resp.json().get("tickets", [])
         count = 0
+        newest = since
         for t in tickets:
-            if t.get("created_at", "") >= since:
-                fb = Normalizer.from_zendesk(t)
-                pipeline(fb)
+            created = t.get("created_at", "")
+            if created > since:
+                pipeline(Normalizer.from_zendesk(t))
                 count += 1
-        log.info(f"Zendesk poll: ingested {count} tickets.")
+                newest = max(newest, created)
+        if newest != since:
+            set_sync_cursor("zendesk", newest)
+        log.info("Zendesk poll: ingested %d tickets.", count)
     except Exception as e:
         log.error(f"Zendesk poll failed: {e}")
 
@@ -405,21 +511,27 @@ def poll_play_store():
 
 
 def poll_slack_channel(channel_id: str):
-    """Fetch recent messages from a Slack channel."""
+    """Fetch Slack messages newer than the stored high-water mark (per channel)."""
     if not settings.slack_bot_token:
         return
+    state_key = f"slack:{channel_id}"
+    oldest = get_sync_cursor(state_key) or str(time.time() - 3600)
     try:
         from slack_sdk import WebClient  # pip install slack_sdk
         client = WebClient(token=settings.slack_bot_token)
-        oldest = str(time.time() - 3600)
         result = client.conversations_history(channel=channel_id, oldest=oldest)
         messages = result.get("messages", [])
+        newest = oldest
+        ingested = 0
         for msg in messages:
             if msg.get("subtype"):        # skip bot/system messages
                 continue
-            fb = Normalizer.from_slack(msg)
-            pipeline(fb)
-        log.info(f"Slack poll [{channel_id}]: ingested {len(messages)} messages.")
+            pipeline(Normalizer.from_slack(msg))
+            ingested += 1
+            newest = max(newest, msg.get("ts", oldest))
+        if newest != oldest:
+            set_sync_cursor(state_key, newest)
+        log.info("Slack poll [%s]: ingested %d messages.", channel_id, ingested)
     except ImportError:
         log.warning("slack_sdk not installed. Run: pip install slack_sdk")
     except Exception as e:
@@ -641,22 +753,27 @@ def detect_taxonomy_drift():
         return
 
     log.info("Running taxonomy drift detection...")
+    model_name = EmbeddingEngine.get().model_name
     with get_conn() as conn:
         rows = conn.execute(
             """
-            SELECT id, text, embedding FROM feedback
-            WHERE labels LIKE '%Uncategorized%' AND embedding IS NOT NULL
-            """
+            SELECT f.id AS id, f.text AS text, f.embedding AS embedding
+            FROM feedback f
+            JOIN feedback_labels fl ON fl.feedback_id = f.id
+            WHERE fl.label = ? AND f.embedding IS NOT NULL AND f.embed_model = ?
+            """,
+            (UNCATEGORIZED_LABEL, model_name),
         ).fetchall()
 
     if len(rows) < 10:
         log.info("Not enough unclassified feedback for drift detection (need ≥10).")
         return
 
-    texts = [r["text"] for r in rows]
-    embeddings = np.array(
-        [np.frombuffer(r["embedding"], dtype="float32") for r in rows]
-    )
+    vectors = [np.frombuffer(r["embedding"], dtype="float32") for r in rows]
+    dim = len(vectors[0])
+    kept = [(r["text"], v) for r, v in zip(rows, vectors) if len(v) == dim]
+    texts = [t for t, _ in kept]
+    embeddings = np.array([v for _, v in kept], dtype="float32")
 
     # HDBSCAN clustering — fully unsupervised, finds arbitrary cluster shapes
     clusterer = hdbscan.HDBSCAN(
@@ -795,44 +912,45 @@ def sync_hubspot_contacts():
 
 # ---- Component C: Revenue Aggregator --------------------------------------
 
+UNCATEGORIZED_LABEL = "General > Feedback > Uncategorized"
+
+
 def get_revenue_impact_report(top_n: int = 20) -> list[dict]:
     """
-    Issue_Score = COUNT(unique_users) * SUM(user_ARR)
-    Returns ranked list: "Fixing X is worth $Y/month across Z users."
+    Rank taxonomy labels by Issue_Score = COUNT(distinct users) * SUM(user ARR).
+
+    Aggregates over the normalised feedback_labels table, so a multi-label
+    review contributes to every label it carries.
     """
     with get_conn() as conn:
         rows = conn.execute(
             """
             SELECT
-                labels,
-                COUNT(DISTINCT user_email) AS user_count,
-                COALESCE(SUM(arr), 0)       AS total_arr,
-                COUNT(*)                    AS feedback_count
-            FROM feedback
-            WHERE labels != '[]'
-            GROUP BY labels
-            ORDER BY (COUNT(DISTINCT user_email) * COALESCE(SUM(arr), 0)) DESC
+                fl.label                      AS label,
+                COUNT(DISTINCT f.user_email)  AS user_count,
+                COALESCE(SUM(f.arr), 0)       AS total_arr,
+                COUNT(*)                      AS feedback_count
+            FROM feedback_labels fl
+            JOIN feedback f ON f.id = fl.feedback_id
+            WHERE fl.label != ?
+            GROUP BY fl.label
+            ORDER BY (COUNT(DISTINCT f.user_email) * COALESCE(SUM(f.arr), 0)) DESC
             LIMIT ?
             """,
-            (top_n,),
+            (UNCATEGORIZED_LABEL, top_n),
         ).fetchall()
 
     report = []
     for row in rows:
-        try:
-            label_list = json.loads(row["labels"])
-        except Exception:
-            label_list = [row["labels"]]
-
         score = row["user_count"] * row["total_arr"]
         report.append({
-            "labels": label_list,
+            "label": row["label"],
             "user_count": row["user_count"],
             "total_arr": round(row["total_arr"], 2),
             "feedback_count": row["feedback_count"],
             "issue_score": round(score, 2),
             "summary": (
-                f"Fixing '{', '.join(label_list)}' is worth "
+                f"Fixing '{row['label']}' is worth "
                 f"${score:,.0f}/year across {row['user_count']} users."
             ),
         })
@@ -855,26 +973,41 @@ class VectorStore:
         self._lock = threading.Lock()
 
     def rebuild_from_db(self):
-        """Load all Jira ticket embeddings from SQLite into FAISS."""
+        """Load Jira ticket embeddings from SQLite into FAISS.
+
+        Only vectors produced by the *current* embedding model are indexed;
+        rows left over from a previous provider/model are skipped so their
+        (differently shaped) vectors cannot corrupt the index.
+        """
+        model_name = EmbeddingEngine.get().model_name
         with get_conn() as conn:
             rows = conn.execute(
-                "SELECT key, embedding FROM jira_tickets WHERE embedding IS NOT NULL"
+                "SELECT key, embedding FROM jira_tickets "
+                "WHERE embedding IS NOT NULL AND embed_model = ?",
+                (model_name,),
             ).fetchall()
 
         if not rows:
-            log.info("VectorStore: no tickets to index.")
+            log.info("VectorStore: no tickets to index (embed_model=%s).", model_name)
+            self.index = None
+            self.ticket_keys = []
             return
 
-        embeddings = np.array(
-            [np.frombuffer(r["embedding"], dtype="float32") for r in rows],
-            dtype="float32",
-        )
-        dim = embeddings.shape[1]
+        vectors = [np.frombuffer(r["embedding"], dtype="float32") for r in rows]
+        dim = len(vectors[0])
+        keep = [(r["key"], v) for r, v in zip(rows, vectors) if len(v) == dim]
+        if len(keep) != len(rows):
+            log.warning(
+                "VectorStore: dropped %d ticket vectors of unexpected dimension.",
+                len(rows) - len(keep),
+            )
+
+        embeddings = np.array([v for _, v in keep], dtype="float32")
         self.index = faiss.IndexFlatIP(dim)   # Inner product = cosine on normalized vecs
         faiss.normalize_L2(embeddings)
         self.index.add(embeddings)
-        self.ticket_keys = [r["key"] for r in rows]
-        log.info(f"VectorStore: indexed {len(rows)} Jira tickets.")
+        self.ticket_keys = [k for k, _ in keep]
+        log.info("VectorStore: indexed %d Jira tickets.", len(self.ticket_keys))
 
     def search(self, query_vec: np.ndarray, k: int = 3) -> list[tuple[str, float]]:
         """Returns list of (jira_key, similarity_score)."""
@@ -935,16 +1068,43 @@ def _upsert_tickets(issues: list[dict]):
     with get_conn() as conn:
         for issue in issues:
             key = issue.get("key", "")
+            if not key:
+                continue
             fields = issue.get("fields", {})
             summary = fields.get("summary", "")
             status = fields.get("status", {}).get("name", "")
+
+            existing = conn.execute(
+                "SELECT summary, embed_model FROM jira_tickets WHERE key = ?", (key,)
+            ).fetchone()
+            # Re-embed only when the text or the embedding model changed.
+            if existing and existing["summary"] == summary and (
+                existing["embed_model"] == embedder.model_name
+            ):
+                conn.execute(
+                    "UPDATE jira_tickets SET status = ?, updated_at = datetime('now') "
+                    "WHERE key = ?",
+                    (status, key),
+                )
+                continue
+
             embedding = embedder.encode_one(f"{key}: {summary}")
             conn.execute(
                 """
-                INSERT OR REPLACE INTO jira_tickets (id, key, summary, status, embedding, updated_at)
-                VALUES (?,?,?,?,?,datetime('now'))
+                INSERT INTO jira_tickets
+                  (id, key, summary, status, embedding, embed_model, updated_at)
+                VALUES (?,?,?,?,?,?,datetime('now'))
+                ON CONFLICT(key) DO UPDATE SET
+                  summary = excluded.summary,
+                  status = excluded.status,
+                  embedding = excluded.embedding,
+                  embed_model = excluded.embed_model,
+                  updated_at = datetime('now')
                 """,
-                (str(uuid.uuid4()), key, summary, status, embedding.tobytes()),
+                (
+                    str(uuid.uuid4()), key, summary, status,
+                    embedding.tobytes(), embedder.model_name,
+                ),
             )
 
 
@@ -1031,9 +1191,12 @@ def chat_with_data(natural_language_query: str) -> dict:
     """
     schema_hint = """
 Table: feedback
-  id, text, user_id, user_email, source, timestamp,
+  id, text, user_id, user_email, source, external_id, timestamp,
   labels (JSON array as text), arr, plan_type,
   jira_ticket, jira_status, created_at
+
+Table: feedback_labels   -- one row per (feedback, label); prefer this for label rollups
+  feedback_id, label
 
 Table: taxonomy
   level1, level2, level3, description
@@ -1098,50 +1261,46 @@ def check_velocity_spikes():
     week_ago  = (now - timedelta(days=7)).isoformat()
     two_weeks = (now - timedelta(days=14)).isoformat()
 
+    def _counts_by_label(conn, start, end=None):
+        if end is None:
+            rows = conn.execute(
+                """
+                SELECT fl.label AS label, COUNT(*) AS cnt
+                FROM feedback_labels fl
+                JOIN feedback f ON f.id = fl.feedback_id
+                WHERE f.timestamp >= ?
+                GROUP BY fl.label
+                """,
+                (start,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT fl.label AS label, COUNT(*) AS cnt
+                FROM feedback_labels fl
+                JOIN feedback f ON f.id = fl.feedback_id
+                WHERE f.timestamp >= ? AND f.timestamp < ?
+                GROUP BY fl.label
+                """,
+                (start, end),
+            ).fetchall()
+        return {r["label"]: r["cnt"] for r in rows}
+
     with get_conn() as conn:
-        # This week
-        this_week = conn.execute(
-            """
-            SELECT labels, COUNT(*) as cnt
-            FROM feedback
-            WHERE timestamp >= ?
-            GROUP BY labels
-            """,
-            (week_ago,),
-        ).fetchall()
+        this_week = _counts_by_label(conn, week_ago)
+        last_week = _counts_by_label(conn, two_weeks, week_ago)
 
-        # Last week
-        last_week = conn.execute(
-            """
-            SELECT labels, COUNT(*) as cnt
-            FROM feedback
-            WHERE timestamp >= ? AND timestamp < ?
-            GROUP BY labels
-            """,
-            (two_weeks, week_ago),
-        ).fetchall()
-
-    last_dict = {r["labels"]: r["cnt"] for r in last_week}
-
-    for row in this_week:
-        label_key = row["labels"]
-        this_cnt  = row["cnt"]
-        last_cnt  = last_dict.get(label_key, 0)
-
+    for label, this_cnt in this_week.items():
+        last_cnt = last_week.get(label, 0)
         if last_cnt == 0:
             continue   # skip brand-new labels (no baseline)
 
         if this_cnt >= last_cnt * settings.velocity_spike_mult:
-            try:
-                label_display = ", ".join(json.loads(label_key))
-            except Exception:
-                label_display = label_key
-
             msg = (
                 f"🚨 *Velocity Spike Detected!*\n"
-                f"Label: `{label_display}`\n"
+                f"Label: `{label}`\n"
                 f"Last week: {last_cnt} → This week: {this_cnt} "
-                f"({this_cnt/max(last_cnt,1):.1f}x increase)"
+                f"({this_cnt / max(last_cnt, 1):.1f}x increase)"
             )
             log.warning(msg)
             send_slack_alert(msg)

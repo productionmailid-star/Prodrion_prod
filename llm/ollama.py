@@ -31,6 +31,7 @@ class OllamaEmbedder(Embedder):
         # Derive the API base from the configured .../api/generate URL.
         self._base = generate_url.rsplit("/api/", 1)[0] or "http://localhost:11434"
         self._model = model
+        self.model_name = f"ollama:{model}"
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         vectors: list[list[float]] = []
