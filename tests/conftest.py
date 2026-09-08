@@ -14,6 +14,8 @@ import os
 import sys
 import types
 
+import pytest
+
 os.environ.setdefault("PRODRION_LLM_PROVIDER", "fake")
 
 
@@ -45,3 +47,34 @@ _ensure_stub("apscheduler")
 _ensure_stub("apscheduler.schedulers")
 _ensure_stub("apscheduler.schedulers.background", BackgroundScheduler=object)
 _ensure_stub("uvicorn", run=lambda *a, **k: None)
+
+
+@pytest.fixture
+def tmp_db(tmp_path, monkeypatch):
+    """Point every module's Settings at a fresh throwaway database and init it.
+
+    Returns the Settings instance. Modules bind ``settings`` at import time and
+    security.py reads ``get_settings()``, so we patch both forms wherever they
+    appear.
+    """
+    import config as _config
+    import db as _db
+    import feedback_platform as _fp
+    import jobs as _jobs
+    import security as _sec
+    import worker as _worker
+
+    s = _config.Settings(
+        _env_file=None,
+        environment="development",
+        llm_provider="fake",
+        db_path=str(tmp_path / "test.db"),
+    )
+    for mod in (_config, _db, _jobs, _fp, _sec, _worker):
+        if hasattr(mod, "settings"):
+            monkeypatch.setattr(mod, "settings", s, raising=False)
+    monkeypatch.setattr(_sec, "get_settings", lambda: s)
+
+    _fp.EmbeddingEngine._instance = None
+    _db.init_db()
+    return s

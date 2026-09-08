@@ -65,6 +65,15 @@ class Settings(BaseSettings):
     # bundled repo-agent/ directory, resolved at runtime).
     repo_agent_allowed_base: str = ""
 
+    # ---- Background worker / job queue ----
+    worker_poll_interval_seconds: float = Field(1.0, gt=0.0)
+    job_max_attempts: int = Field(5, ge=1)
+    job_backoff_base_seconds: float = Field(5.0, gt=0.0)
+    job_backoff_max_seconds: float = Field(3600.0, gt=0.0)
+    # Run the worker loop + scheduler in a thread inside the API process.
+    # Handy for local dev; in production run worker.py as its own service.
+    inline_worker: bool = False
+
     # ---- LLM / embeddings ----
     # Provider for both generation and embeddings. "fake" is test-only.
     llm_provider: LLMProviderName = "gemini"

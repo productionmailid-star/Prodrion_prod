@@ -182,18 +182,20 @@ async def test_size_limit_passes_small_request():
 
 
 @pytest.fixture
-def api(tmp_path, monkeypatch):
+def api(tmp_db, monkeypatch):
+    import db as _db
     import feedback_platform as fp
+    import jobs as _jobs
 
+    # tmp_db already wired a fresh DB; overlay the auth secrets for these tests.
     s = _settings(
-        db_path=str(tmp_path / "t.db"),
+        db_path=tmp_db.db_path,
         api_auth_token="sekret",
         webhook_secret="hook",
     )
-    monkeypatch.setattr(fp, "settings", s)
+    for mod in (_db, _jobs, fp):
+        monkeypatch.setattr(mod, "settings", s)
     monkeypatch.setattr(security, "get_settings", lambda: s)
-    fp.EmbeddingEngine._instance = None
-    fp.init_db()
 
     from fastapi.testclient import TestClient
 
@@ -215,15 +217,19 @@ def test_taxonomy_requires_auth(api):
 
 
 def test_webhook_feedback_requires_secret(api):
-    _fp, client = api
+    fp, client = api
     assert client.post("/webhook/feedback", json={"text": "hi"}).status_code == 401
     ok = client.post(
         "/webhook/feedback",
         json={"text": "cannot log in", "email": "a@b.com"},
         headers={"X-Webhook-Secret": "hook"},
     )
-    assert ok.status_code == 200
-    assert ok.json()["status"] == "ingested"
+    assert ok.status_code == 202
+    body = ok.json()
+    assert body["status"] == "queued"
+    # the item is now a pending job, not yet processed
+    job = fp.jobs.get_job(body["job_id"])
+    assert job["type"] == "process_feedback" and job["status"] == "pending"
 
 
 def test_import_users_accepts_csv_body(api):

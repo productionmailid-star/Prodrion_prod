@@ -5,20 +5,10 @@ from __future__ import annotations
 import pytest
 
 import feedback_platform as fp
-from config import Settings
 
 
 @pytest.fixture
-def db(tmp_path, monkeypatch):
-    s = Settings(
-        _env_file=None,
-        environment="development",
-        llm_provider="fake",
-        db_path=str(tmp_path / "t.db"),
-    )
-    monkeypatch.setattr(fp, "settings", s)
-    fp.EmbeddingEngine._instance = None
-    fp.init_db()
+def db(tmp_db):
     return fp
 
 

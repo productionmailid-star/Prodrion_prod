@@ -20,6 +20,8 @@ def test_expected_routes_present():
         "/bootstrap-taxonomy",
         "/taxonomy",
         "/import-users",
+        "/jobs",
+        "/jobs/{job_id}",
         "/health",
     }:
         assert expected in paths

@@ -35,7 +35,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 
 import faiss
@@ -46,7 +46,15 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from bs4 import BeautifulSoup
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 
+import jobs
 from config import settings
+from db import (
+    get_conn,
+    get_sync_cursor,
+    init_db,
+    set_sync_cursor,
+    utc_now_iso,
+)
 from llm import get_embedder, get_llm
 from security import (
     RequestSizeLimitMiddleware,
@@ -59,156 +67,9 @@ from security import (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 log = logging.getLogger("feedback_platform")
 
-# =============================================================================
-# CONFIG
-# =============================================================================
-# All runtime configuration lives in config.Settings, loaded from the
-# environment / .env with the PRODRION_ prefix. See .env.example.
-
-
-def _utc_now_iso() -> str:
-    """Timezone-aware UTC timestamp in ISO-8601 (e.g. 2026-01-01T00:00:00+00:00)."""
-    return datetime.now(timezone.utc).isoformat()
-
-
-# =============================================================================
-# ENGINE 0: DATABASE LAYER
-# =============================================================================
-
-DB_SCHEMA = """
-CREATE TABLE IF NOT EXISTS feedback (
-    id          TEXT PRIMARY KEY,
-    text        TEXT NOT NULL,
-    user_id     TEXT,
-    user_email  TEXT,
-    source      TEXT NOT NULL,
-    external_id TEXT,                      -- stable id from the source, for dedup
-    timestamp   TEXT NOT NULL,
-    raw_meta    TEXT,
-    labels      TEXT,                      -- JSON array (kept for raw views)
-    arr         REAL DEFAULT 0,
-    plan_type   TEXT,
-    jira_ticket TEXT,
-    jira_status TEXT,
-    embedding   BLOB,
-    embed_model TEXT,                      -- provider/model that produced `embedding`
-    created_at  TEXT DEFAULT (datetime('now'))
-);
-
--- Idempotency: one row per (source, external_id) when the source gives us an id.
-CREATE UNIQUE INDEX IF NOT EXISTS ux_feedback_source_ext
-    ON feedback(source, external_id) WHERE external_id IS NOT NULL;
-
--- Normalised labels: one row per (feedback, label) for correct per-node rollups.
-CREATE TABLE IF NOT EXISTS feedback_labels (
-    feedback_id TEXT NOT NULL,
-    label       TEXT NOT NULL,
-    PRIMARY KEY (feedback_id, label),
-    FOREIGN KEY (feedback_id) REFERENCES feedback(id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS ix_feedback_labels_label ON feedback_labels(label);
-
-CREATE TABLE IF NOT EXISTS taxonomy (
-    id          TEXT PRIMARY KEY,
-    level1      TEXT NOT NULL,
-    level2      TEXT,
-    level3      TEXT,
-    description TEXT,
-    created_at  TEXT DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS jira_tickets (
-    id          TEXT PRIMARY KEY,
-    key         TEXT NOT NULL,
-    summary     TEXT NOT NULL,
-    status      TEXT,
-    embedding   BLOB,
-    embed_model TEXT,
-    updated_at  TEXT DEFAULT (datetime('now'))
-);
-CREATE UNIQUE INDEX IF NOT EXISTS ux_jira_tickets_key ON jira_tickets(key);
-
-CREATE TABLE IF NOT EXISTS users (
-    email       TEXT PRIMARY KEY,
-    user_id     TEXT,
-    arr         REAL DEFAULT 0,
-    plan_type   TEXT,
-    company     TEXT
-);
-
--- Per-source ingestion high-water mark (e.g. last seen created_at / ts).
-CREATE TABLE IF NOT EXISTS sync_state (
-    source     TEXT PRIMARY KEY,
-    cursor     TEXT,
-    updated_at TEXT DEFAULT (datetime('now'))
-);
-"""
-
-# Columns added after the original prototype schema — applied to pre-existing
-# databases by _migrate().
-_ADDED_COLUMNS = {
-    "feedback": [("external_id", "TEXT"), ("embed_model", "TEXT")],
-    "jira_tickets": [("embed_model", "TEXT")],
-}
-
-
-def get_conn() -> sqlite3.Connection:
-    timeout = settings.sqlite_busy_timeout_seconds
-    conn = sqlite3.connect(settings.db_path, check_same_thread=False, timeout=timeout)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute(f"PRAGMA busy_timeout={int(timeout * 1000)}")
-    conn.execute("PRAGMA foreign_keys=ON")
-    return conn
-
-
-def _migrate(conn: sqlite3.Connection) -> None:
-    """Add columns introduced after the prototype schema to pre-existing tables.
-
-    Runs before the schema script so the CREATE INDEX statements that reference
-    the new columns succeed on an upgraded database.
-    """
-    tables = {
-        row["name"]
-        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-    }
-    for table, columns in _ADDED_COLUMNS.items():
-        if table not in tables:
-            continue
-        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
-        for name, decl in columns:
-            if name not in existing:
-                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
-                log.info("Migrated: added %s.%s", table, name)
-
-
-def init_db():
-    with get_conn() as conn:
-        _migrate(conn)
-        conn.executescript(DB_SCHEMA)
-    log.info("Database initialized.")
-
-
-def get_sync_cursor(source: str) -> str | None:
-    """Return the stored high-water mark for a polling source, or None."""
-    with get_conn() as conn:
-        row = conn.execute(
-            "SELECT cursor FROM sync_state WHERE source = ?", (source,)
-        ).fetchone()
-    return row["cursor"] if row else None
-
-
-def set_sync_cursor(source: str, cursor: str) -> None:
-    with get_conn() as conn:
-        conn.execute(
-            """
-            INSERT INTO sync_state (source, cursor, updated_at)
-            VALUES (?, ?, datetime('now'))
-            ON CONFLICT(source) DO UPDATE SET
-              cursor = excluded.cursor, updated_at = datetime('now')
-            """,
-            (source, cursor),
-        )
+# Configuration lives in config.Settings; the DB connection + schema layer is in
+# db.py so the worker and job queue can use it without importing this module.
+_utc_now_iso = utc_now_iso
 
 
 # =============================================================================
@@ -463,7 +324,7 @@ def poll_zendesk():
         for t in tickets:
             created = t.get("created_at", "")
             if created > since:
-                pipeline(Normalizer.from_zendesk(t))
+                enqueue_feedback(Normalizer.from_zendesk(t))
                 count += 1
                 newest = max(newest, created)
         if newest != since:
@@ -482,8 +343,7 @@ def poll_app_store():
         app = AppStore(country="us", app_name="", app_id=settings.app_store_app_id)
         app.review(how_many=50)
         for review in app.reviews:
-            fb = Normalizer.from_app_store(review)
-            pipeline(fb)
+            enqueue_feedback(Normalizer.from_app_store(review))
         log.info(f"App Store poll: ingested {len(app.reviews)} reviews.")
     except ImportError:
         log.warning("app-store-scraper not installed. Run: pip install app-store-scraper")
@@ -501,8 +361,7 @@ def poll_play_store():
             settings.play_store_app_id, lang="en", country="us", sort=Sort.NEWEST, count=50
         )
         for review in result:
-            fb = Normalizer.from_play_store(review)
-            pipeline(fb)
+            enqueue_feedback(Normalizer.from_play_store(review))
         log.info(f"Play Store poll: ingested {len(result)} reviews.")
     except ImportError:
         log.warning("google-play-scraper not installed. Run: pip install google-play-scraper")
@@ -526,7 +385,7 @@ def poll_slack_channel(channel_id: str):
         for msg in messages:
             if msg.get("subtype"):        # skip bot/system messages
                 continue
-            pipeline(Normalizer.from_slack(msg))
+            enqueue_feedback(Normalizer.from_slack(msg))
             ingested += 1
             newest = max(newest, msg.get("ts", oldest))
         if newest != oldest:
@@ -1344,6 +1203,8 @@ def pipeline(fb: StandardFeedbackObject) -> StandardFeedbackObject:
       2. Classify taxonomy (Engine 2B)
       3. Match to Jira (Engine 4C)
       4. Save to database
+
+    Runs in the background worker (see worker.py), not in the request handler.
     """
     auto_bootstrap_taxonomy_if_needed(fb.source)
     fb = resolve_user_revenue(fb)
@@ -1351,6 +1212,11 @@ def pipeline(fb: StandardFeedbackObject) -> StandardFeedbackObject:
     fb = match_to_jira(fb)
     save_feedback(fb)
     return fb
+
+
+def enqueue_feedback(fb: StandardFeedbackObject) -> str:
+    """Persist a normalised feedback item as a background job; returns its id."""
+    return jobs.enqueue("process_feedback", asdict(fb))
 
 
 # =============================================================================
@@ -1376,27 +1242,23 @@ async def _read_capped_body(request: Request) -> bytes:
     return body
 
 
-@app.post("/webhook/feedback")
+@app.post("/webhook/feedback", status_code=202)
 async def webhook_feedback(
     request: Request,
     x_webhook_secret: str | None = Header(default=None, alias="X-Webhook-Secret"),
 ):
-    """Generic webhook endpoint. Accepts any JSON payload. Requires X-Webhook-Secret."""
+    """Generic webhook endpoint. Accepts any JSON payload. Requires X-Webhook-Secret.
+
+    The item is normalised and queued; the background worker runs the pipeline.
+    """
     verify_webhook_secret(x_webhook_secret)
     body = await _read_capped_body(request)
     try:
         payload = json.loads(body)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON payload.") from None
-    fb = Normalizer.from_webhook(payload)
-    fb = pipeline(fb)
-    return {
-        "status": "ingested",
-        "id": fb.id,
-        "labels": fb.labels,
-        "jira_ticket": fb.jira_ticket,
-        "jira_status": fb.jira_status,
-    }
+    job_id = enqueue_feedback(Normalizer.from_webhook(payload))
+    return {"status": "queued", "job_id": job_id}
 
 
 @app.post("/webhook/slack")
@@ -1417,8 +1279,7 @@ async def webhook_slack(request: Request):
         return {"challenge": payload["challenge"]}
     event = payload.get("event", {})
     if event.get("type") == "message" and not event.get("subtype"):
-        fb = Normalizer.from_slack(event)
-        pipeline(fb)
+        enqueue_feedback(Normalizer.from_slack(event))
     return {"status": "ok"}
 
 
@@ -1465,17 +1326,46 @@ async def import_users(request: Request):
     return {"status": "imported", "rows": count}
 
 
+@app.get("/jobs/{job_id}", dependencies=_ADMIN)
+async def get_job_status(job_id: str):
+    job = jobs.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    return job
+
+
+@app.get("/jobs", dependencies=_ADMIN)
+async def list_job_status(status: str | None = None, limit: int = 50):
+    """List recent jobs; pass ?status=dead for the dead-letter view."""
+    return {"jobs": jobs.list_jobs(status=status, limit=limit)}
+
+
 @app.get("/health")
 async def health():
-    with get_conn() as conn:
-        feedback_count = conn.execute("SELECT COUNT(*) FROM feedback").fetchone()[0]
-        ticket_count   = conn.execute("SELECT COUNT(*) FROM jira_tickets").fetchone()[0]
+    try:
+        with get_conn() as conn:
+            feedback_count = conn.execute("SELECT COUNT(*) FROM feedback").fetchone()[0]
+            ticket_count = conn.execute("SELECT COUNT(*) FROM jira_tickets").fetchone()[0]
+            pending_jobs = conn.execute(
+                "SELECT COUNT(*) FROM jobs WHERE status='pending'"
+            ).fetchone()[0]
+            dead_jobs = conn.execute(
+                "SELECT COUNT(*) FROM jobs WHERE status='dead'"
+            ).fetchone()[0]
+        db_ok = True
+    except Exception as e:
+        log.error("Health check DB error: %s", e)
+        feedback_count = ticket_count = pending_jobs = dead_jobs = None
+        db_ok = False
+
     return {
-        "status": "ok",
+        "status": "ok" if db_ok else "degraded",
+        "database": db_ok,
+        "llm_provider": settings.llm_provider,
         "feedback_count": feedback_count,
         "jira_tickets_indexed": ticket_count,
-        "ollama_url": settings.ollama_url,
-        "model": settings.ollama_model,
+        "jobs_pending": pending_jobs,
+        "jobs_dead": dead_jobs,
     }
 
 
@@ -1508,32 +1398,44 @@ def start_scheduler():
 
 def startup():
     log.info("=" * 60)
-    log.info("  FEEDBACK INTELLIGENCE PLATFORM")
+    log.info("  FEEDBACK INTELLIGENCE PLATFORM (API)")
     log.info("=" * 60)
 
     init_db()
 
-    # Pre-load embedding model
-    EmbeddingEngine.get()
+    if settings.inline_worker:
+        # Dev convenience: run the worker loop + scheduler in this process.
+        import threading
 
-    # Sync Jira tickets and build vector index on startup
-    sync_jira_tickets()
+        import worker
 
-    # Start background scheduler
-    start_scheduler()
+        stop = threading.Event()
+        app.state.worker_stop = stop
+        EmbeddingEngine.get()
+        sync_jira_tickets()
+        start_scheduler()
+        threading.Thread(
+            target=worker.run_forever, args=(stop,), name="inline-worker", daemon=True
+        ).start()
+        log.info("Inline worker started (PRODRION_INLINE_WORKER=true).")
+    else:
+        log.info("API only — run 'python worker.py' for background processing.")
 
-    log.info("Platform ready. Starting API server on http://0.0.0.0:8000")
-    log.info("  POST /webhook/feedback  → ingest any feedback JSON")
-    log.info("  POST /webhook/slack     → Slack Events API")
-    log.info("  GET  /query?q=...       → natural language → SQL")
-    log.info("  GET  /revenue-impact    → issues ranked by $ impact")
-    log.info("  POST /bootstrap-taxonomy?url=...  → auto-build taxonomy")
-    log.info("  GET  /health            → system status")
+    log.info("Platform ready. Endpoints: /webhook/feedback, /webhook/slack, "
+             "/query, /revenue-impact, /bootstrap-taxonomy, /taxonomy, "
+             "/import-users, /jobs, /health")
 
 
 @app.on_event("startup")
 async def on_startup():
     startup()
+
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    stop = getattr(app.state, "worker_stop", None)
+    if stop is not None:
+        stop.set()
 
 
 # =============================================================================

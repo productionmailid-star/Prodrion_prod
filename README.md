@@ -62,13 +62,24 @@ the VM runs the FastAPI service, a background worker, the SQLite/Postgres store,
 and the on-disk vector index. The frontend is served as static files and talks
 to Supabase directly for auth and application data.
 
+## Processes
+
+| Process | Command | Responsibility |
+| --- | --- | --- |
+| API | `python feedback_platform.py` | HTTP endpoints; webhooks enqueue jobs and return `202` |
+| Worker | `python worker.py` | Drains the job queue (per-feedback pipeline) and runs the APScheduler polling / drift / velocity jobs |
+
+Both share the SQLite database and use it as the job queue — no external broker.
+For local development set `PRODRION_INLINE_WORKER=true` to run the worker loop
+inside the API process instead.
+
 ## Local development
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt -r requirements-dev.txt   # dev file added in milestone 0/1
-cp .env.example .env                                      # added in milestone 1
-python feedback_platform.py
+pip install -r requirements.txt -r requirements-dev.txt
+cp .env.example .env
+PRODRION_INLINE_WORKER=true python feedback_platform.py   # API + worker in one process
 ```
 
 Run the tests:

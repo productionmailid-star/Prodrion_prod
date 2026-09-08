@@ -33,6 +33,10 @@ Deployment constraints that shape every recommendation:
 
 ## P1 — High
 
+> Status: 1.1 addressed in milestone 5 (DB-backed job queue + `worker.py`);
+> 1.5/1.6 partially (narrower error handling, `/health` now checks the DB +
+> reports queue depth). 1.2–1.4, 1.7–1.9 outstanding.
+
 | ID | Issue | Fix type |
 | --- | --- | --- |
 | 1.1 | **Synchronous LLM work in request handlers.** `POST /webhook/feedback` runs the full pipeline inline; no queue, retry, or dead-letter. | architectural |
