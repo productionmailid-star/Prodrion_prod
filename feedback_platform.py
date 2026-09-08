@@ -67,6 +67,7 @@ from security import (
     RequestSizeLimitMiddleware,
     is_safe_public_url,
     require_bearer_token,
+    require_supabase_user,
     verify_slack_signature,
     verify_webhook_secret,
 )
@@ -1270,6 +1271,16 @@ def enqueue_repo_analysis(
 app = FastAPI(title="Feedback Intelligence Platform", version="1.0.0")
 app.add_middleware(RequestSizeLimitMiddleware, max_bytes=settings.max_request_bytes)
 app.add_middleware(RequestIdMiddleware)
+if settings.cors_origins_list:
+    from fastapi.middleware.cors import CORSMiddleware
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_origins_list,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 install_exception_handlers(app)
 
 # Dependency list applied to every admin / query endpoint.
@@ -1376,6 +1387,22 @@ async def import_users(request: Request):
         raise HTTPException(status_code=400, detail="body must be UTF-8 CSV text") from None
     count = import_users_from_csv_text(csv_text)
     return {"status": "imported", "rows": count}
+
+
+@app.get("/me/credits")
+async def my_credits(user_id: str = Depends(require_supabase_user)):
+    """Credit balance for the signed-in dashboard user.
+
+    Single-tenant for now: every user maps to the default workspace.
+    TODO: a users<->workspace mapping table.
+    """
+    ws = settings.default_workspace_id
+    return {
+        "user_id": user_id,
+        "workspace_id": ws,
+        "enabled": settings.credits_enabled,
+        "balance": credits.get_balance(ws),
+    }
 
 
 @app.get("/credits", dependencies=_ADMIN)

@@ -58,6 +58,10 @@ class Settings(BaseSettings):
     # ---- API security ----
     # Bearer token for the admin/query endpoints. Required in production.
     api_auth_token: str = ""
+    # Comma-separated browser origins allowed to call the API (CORS).
+    cors_allow_origins: str = ""
+    # Supabase project JWT secret (HS256) — verifies dashboard user tokens.
+    supabase_jwt_secret: str = ""
     # Shared secret for POST /webhook/feedback (X-Webhook-Secret header).
     webhook_secret: str = ""
     # Slack signing secret for POST /webhook/slack signature verification.
@@ -152,6 +156,10 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.environment is Environment.production
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        return [o.strip() for o in self.cors_allow_origins.split(",") if o.strip()]
 
     @field_validator("log_level")
     @classmethod

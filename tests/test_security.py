@@ -58,6 +58,43 @@ async def test_bearer_rejects_wrong_token(use_settings):
     assert exc.value.status_code == 403
 
 
+# --- require_supabase_user -------------------------------------------
+
+
+def _supabase_jwt(secret: str, sub: str = "user-1", aud: str = "authenticated") -> str:
+    import jwt
+
+    return jwt.encode(
+        {"sub": sub, "aud": aud, "exp": int(time.time()) + 3600}, secret, algorithm="HS256"
+    )
+
+
+async def test_supabase_user_dev_fallback(use_settings):
+    use_settings(supabase_jwt_secret="")
+    assert await security.require_supabase_user(authorization=None) == "dev-user"
+
+
+async def test_supabase_user_valid_token(use_settings):
+    use_settings(supabase_jwt_secret="jwtsec")
+    tok = _supabase_jwt("jwtsec", sub="abc-123")
+    assert await security.require_supabase_user(authorization=f"Bearer {tok}") == "abc-123"
+
+
+async def test_supabase_user_rejects_bad_signature(use_settings):
+    use_settings(supabase_jwt_secret="jwtsec")
+    tok = _supabase_jwt("wrong-secret")
+    with pytest.raises(HTTPException) as exc:
+        await security.require_supabase_user(authorization=f"Bearer {tok}")
+    assert exc.value.status_code == 401
+
+
+async def test_supabase_user_rejects_wrong_audience(use_settings):
+    use_settings(supabase_jwt_secret="jwtsec")
+    tok = _supabase_jwt("jwtsec", aud="something-else")
+    with pytest.raises(HTTPException):
+        await security.require_supabase_user(authorization=f"Bearer {tok}")
+
+
 # --- verify_webhook_secret --------------------------------------------
 
 
@@ -193,6 +230,7 @@ def api(tmp_db, monkeypatch):
         db_path=tmp_db.db_path,
         api_auth_token="sekret",
         webhook_secret="hook",
+        supabase_jwt_secret="jwtsecret",
     )
     for mod in (_db, _jobs, _credits, fp):
         monkeypatch.setattr(mod, "settings", s)
@@ -231,6 +269,26 @@ def test_webhook_feedback_requires_secret(api):
     # the item is now a pending job, not yet processed
     job = fp.jobs.get_job(body["job_id"])
     assert job["type"] == "process_feedback" and job["status"] == "pending"
+
+
+def test_me_credits_uses_supabase_token(api):
+    import time
+
+    import jwt
+
+    _fp, client = api
+    tok = jwt.encode(
+        {"sub": "dash-user", "aud": "authenticated", "exp": int(time.time()) + 3600},
+        "jwtsecret",
+        algorithm="HS256",
+    )
+    r = client.get("/me/credits", headers={"Authorization": f"Bearer {tok}"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["user_id"] == "dash-user"
+    assert body["balance"] == 0
+    # no token -> 401
+    assert client.get("/me/credits").status_code == 401
 
 
 def test_import_users_accepts_csv_body(api):

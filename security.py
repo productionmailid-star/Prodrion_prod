@@ -70,6 +70,46 @@ async def require_bearer_token(authorization: str | None = Header(default=None))
         raise HTTPException(status.HTTP_403_FORBIDDEN, "invalid bearer token")
 
 
+async def require_supabase_user(authorization: str | None = Header(default=None)) -> str:
+    """Verify a Supabase access token (HS256) and return the user id (``sub``).
+
+    When ``PRODRION_SUPABASE_JWT_SECRET`` is unset and the environment is not
+    production, returns a fixed ``dev-user`` so the dashboard can be exercised
+    locally. TODO: support Supabase asymmetric (JWKS) verification.
+    """
+    settings = get_settings()
+    secret = settings.supabase_jwt_secret
+    if not secret:
+        if settings.is_production:
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE, "supabase auth is not configured"
+            )
+        _warn_once("PRODRION_SUPABASE_JWT_SECRET is not set - accepting dev-user (dev only).")
+        return "dev-user"
+
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED,
+            "missing bearer token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    import jwt
+
+    try:
+        claims = jwt.decode(
+            authorization[len("Bearer ") :].strip(),
+            secret,
+            algorithms=["HS256"],
+            audience="authenticated",
+        )
+    except Exception as exc:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, f"invalid token: {exc}") from None
+    sub = claims.get("sub")
+    if not sub:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "token has no subject")
+    return str(sub)
+
+
 # ---------------------------------------------------------------------------
 # Webhook verification
 # ---------------------------------------------------------------------------
