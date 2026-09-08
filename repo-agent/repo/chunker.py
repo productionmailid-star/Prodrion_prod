@@ -1,4 +1,5 @@
 from pathlib import Path
+
 from tree_sitter import Parser
 from tree_sitter_language_pack import get_language
 
@@ -24,7 +25,7 @@ class CodeChunker:
         parser = Parser()
         parser.language = self.languages[suffix]
 
-        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+        with open(file_path, encoding="utf-8", errors="ignore") as f:
             code = f.read()
 
         tree = parser.parse(bytes(code, "utf8"))

@@ -1,0 +1,49 @@
+[project]
+name = "prodrion"
+version = "0.1.0"
+description = "Turn negative customer reviews into bucketed issues and AI-drafted code changes."
+requires-python = ">=3.10"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+extend-exclude = ["__pycache__", ".venv"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+]
+ignore = [
+    "E501",  # line length is handled by the formatter
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]
+# Legacy prototype modules carry pre-existing style debt. It is tracked in
+# docs/production-readiness.md and cleared as each module is rewritten in a
+# later milestone; suppress only the rules they currently trip so new code
+# is still held to the full set.
+"feedback_platform.py" = ["E741", "B905", "B904"]
+"reviewer.py" = ["E402"]
+"repo_agent_server.py" = ["E402"]
+"goal_to_repo_agent.py" = ["E741"]
+"repo-agent/agents/*.py" = ["E741"]
+"repo-agent/repo/*.py" = ["E741"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310", "py311", "py312"]
+# The prototype is not yet formatted; milestones bring files under black as
+# they are rewritten. CI checks tests/ only for now.
+extend-exclude = '(^|/)(feedback_platform|reviewer|repo_agent_server|goal_to_repo_agent|injection)\.py$|(^|/)repo-agent/'
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+pythonpath = [".", "repo-agent"]
+asyncio_mode = "auto"

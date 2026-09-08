@@ -2,15 +2,14 @@ import os
 import sys
 from pathlib import Path
 
-from agents.goal_validator import GoalValidator
-from agents.discovery import DiscoveryAgent
 from agents.behaviour_locator import BehaviorLocator
+from agents.discovery import DiscoveryAgent
+from agents.goal_validator import GoalValidator
 from agents.planner import ChangePlanner
 from agents.reporter import Reporter
-
-from repo.scanner import RepoScanner
 from repo.chunker import CodeChunker
 from repo.indexer import CodeIndexer
+from repo.scanner import RepoScanner
 
 
 def print_header():

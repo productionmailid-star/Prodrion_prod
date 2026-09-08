@@ -29,7 +29,7 @@ class BehaviorLocator:
     def _read_lines(self, file: str) -> list[str]:
         """Return 0-indexed list of line strings (no newline chars)."""
         try:
-            with open(self.repo_root / file, "r", encoding="utf-8", errors="ignore") as f:
+            with open(self.repo_root / file, encoding="utf-8", errors="ignore") as f:
                 return f.read().splitlines()
         except Exception:
             return []

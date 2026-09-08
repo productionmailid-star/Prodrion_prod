@@ -15,12 +15,11 @@ Start with:
 Does NOT modify any file inside repo-agent/.
 """
 
-import sys
-import json
-import uuid
 import asyncio
+import json
+import sys
+import uuid
 from pathlib import Path
-from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
@@ -30,14 +29,13 @@ from pydantic import BaseModel
 REPO_AGENT_DIR = Path(__file__).parent / "repo-agent"
 sys.path.insert(0, str(REPO_AGENT_DIR))
 
-from agents.goal_validator import GoalValidator
-from agents.discovery import DiscoveryAgent
 from agents.behaviour_locator import BehaviorLocator
+from agents.discovery import DiscoveryAgent
+from agents.goal_validator import GoalValidator
 from agents.planner import ChangePlanner
-
-from repo.scanner import RepoScanner
 from repo.chunker import CodeChunker
 from repo.indexer import CodeIndexer
+from repo.scanner import RepoScanner
 
 # ── App ──────────────────────────────────────────────────────────────────────
 app = FastAPI(title="Repo Agent Server", version="1.0.0")
@@ -54,13 +52,13 @@ DEFAULT_REPO_PATH = str(REPO_AGENT_DIR)
 # ── Schemas ──────────────────────────────────────────────────────────────────
 class RunRequest(BaseModel):
     goal: str
-    repo_path: Optional[str] = None   # overrides DEFAULT_REPO_PATH per request
+    repo_path: str | None = None   # overrides DEFAULT_REPO_PATH per request
 
 
 class RunResponse(BaseModel):
     ok: bool
     session_id: str
-    message: Optional[str] = None
+    message: str | None = None
 
 
 # ── Health ───────────────────────────────────────────────────────────────────

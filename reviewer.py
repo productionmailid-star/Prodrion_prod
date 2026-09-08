@@ -19,13 +19,13 @@ INSTALL DEPENDENCIES:
     (model auto-downloads ~67MB on first run, cached after that)
 """
 
-import requests
 import json
-import time
 import re
+import time
 import urllib.parse
 from datetime import datetime, timezone
 
+import requests
 
 # ══════════════════════════════════════════════════════════
 # SENTIMENT FILTER  —  negative review detection
@@ -270,7 +270,7 @@ def _get_play_package_id(app_name: str) -> tuple[str, str] | tuple[None, None]:
 
 def fetch_google_play_reviews(app_name: str, count: int = 20) -> list[dict]:
     try:
-        from google_play_scraper import reviews, Sort
+        from google_play_scraper import Sort, reviews
 
         print(f"\n[Google Play] Searching for '{app_name}'...")
         app_id, app_title = _get_play_package_id(app_name)

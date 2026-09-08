@@ -3,7 +3,6 @@ from pathlib import Path
 
 from agents.llm import LocalLLM
 
-
 # ═══════════════════════════════════════════════════════════════════════
 # SCOPE ANALYSER — pure regex, zero LLM, zero hallucination
 # ═══════════════════════════════════════════════════════════════════════
@@ -242,7 +241,7 @@ class ChangePlanner:
 
     def _read_lines(self, file_path: str) -> list[str]:
         try:
-            with open(self.repo_path / file_path, "r", encoding="utf-8") as f:
+            with open(self.repo_path / file_path, encoding="utf-8") as f:
                 return f.read().splitlines()
         except Exception:
             return []

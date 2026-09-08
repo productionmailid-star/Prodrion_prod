@@ -38,18 +38,17 @@ import sqlite3
 import threading
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Any, Optional
 
+import faiss
 import numpy as np
 import requests
+import uvicorn
 from apscheduler.schedulers.background import BackgroundScheduler
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException, Request
 from sentence_transformers import SentenceTransformer
-import faiss
-import uvicorn
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 log = logging.getLogger("feedback_platform")
@@ -144,7 +143,7 @@ def init_db():
 # =============================================================================
 
 class EmbeddingEngine:
-    _instance: Optional[EmbeddingEngine] = None
+    _instance: EmbeddingEngine | None = None
     _lock = threading.Lock()
 
     def __init__(self):
@@ -337,7 +336,7 @@ def poll_play_store():
     if not PLAY_STORE_ID:
         return
     try:
-        from google_play_scraper import reviews, Sort  # pip install google-play-scraper
+        from google_play_scraper import Sort, reviews  # pip install google-play-scraper
         result, _ = reviews(PLAY_STORE_ID, lang="en", country="us", sort=Sort.NEWEST, count=50)
         for review in result:
             fb = Normalizer.from_play_store(review)
@@ -787,7 +786,7 @@ class VectorStore:
     """
 
     def __init__(self):
-        self.index: Optional[faiss.Index] = None
+        self.index: faiss.Index | None = None
         self.ticket_keys: list[str] = []   # parallel list: index position → jira key
         self._lock = threading.Lock()
 

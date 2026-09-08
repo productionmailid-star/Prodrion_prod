@@ -21,10 +21,11 @@ Requirements:
 No internal files of either sub-system are modified.
 """
 
-import requests
 import json
 import sys
 from collections import Counter
+
+import requests
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -231,7 +232,7 @@ def print_report(cluster: dict, goal: str, agent_result: dict):
     print()
 
     if agent_result.get("error"):
-        print(f"[SKIPPED] Repo agent returned an error:")
+        print("[SKIPPED] Repo agent returned an error:")
         print(f"  {agent_result['error']}")
         return
 
