@@ -5,16 +5,13 @@ uvicorn[standard]>=0.29.0
 # Configuration (typed settings from env / .env)
 pydantic-settings>=2.0.0
 
-# Scheduler (replaces cron)
+# Scheduler (in-process polling + drift jobs)
 apscheduler>=3.10.0
 
-# Database
-sqlalchemy>=2.0.0
+# LLM + embeddings provider (default: Gemini free-tier API)
+google-genai>=1.0.0
 
-# Embeddings (free, local)
-sentence-transformers>=2.7.0
-
-# Vector search (free, local — replaces Pinecone)
+# Vector search (in-process)
 faiss-cpu>=1.8.0
 
 # Clustering for drift detection (free)

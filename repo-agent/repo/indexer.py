@@ -1,7 +1,6 @@
 import uuid
 
-import ollama
-
+from llm import get_embedder
 from repo.splitter import split_text
 
 
@@ -11,12 +10,14 @@ def _make_client():
     """
     try:
         import chromadb
+
         # Modern API — PersistentClient (>=0.4.0)
         return chromadb.PersistentClient(path="./chroma_db")
     except AttributeError:
         # Older API fallback
         import chromadb
         from chromadb.config import Settings
+
         return chromadb.Client(
             Settings(
                 persist_directory="./chroma_db",
@@ -28,13 +29,10 @@ def _make_client():
 class CodeIndexer:
 
     COLLECTION_NAME = "codebase"
-    EMBED_MODEL = "nomic-embed-text"
 
     def __init__(self):
         self.client = _make_client()
-        self.collection = self.client.get_or_create_collection(
-            name=self.COLLECTION_NAME
-        )
+        self.collection = self.client.get_or_create_collection(name=self.COLLECTION_NAME)
 
     # ── Status helpers ────────────────────────────────────────
 
@@ -45,15 +43,13 @@ class CodeIndexer:
     def clear(self):
         """Drop and recreate the collection (full re-index)."""
         self.client.delete_collection(self.COLLECTION_NAME)
-        self.collection = self.client.get_or_create_collection(
-            name=self.COLLECTION_NAME
-        )
+        self.collection = self.client.get_or_create_collection(name=self.COLLECTION_NAME)
 
     # ── Embedding ────────────────────────────────────────────
 
     def embed(self, text: str):
         """
-        Embed text via Ollama nomic-embed-text.
+        Embed text via the configured provider (llm.get_embedder).
         Retries with progressively smaller input on failure.
         """
         size = len(text)
@@ -61,13 +57,9 @@ class CodeIndexer:
 
         while attempts > 0:
             try:
-                response = ollama.embeddings(
-                    model=self.EMBED_MODEL,
-                    prompt=text[:size],
-                )
-                emb = response.get("embedding")
-                if isinstance(emb, list) and len(emb) > 0:
-                    return emb
+                vectors = get_embedder().embed([text[:size]])
+                if vectors and len(vectors[0]) > 0:
+                    return vectors[0]
             except Exception:
                 pass
 
@@ -94,12 +86,14 @@ class CodeIndexer:
                     ids=[str(uuid.uuid4())],
                     embeddings=[emb],
                     documents=[piece],
-                    metadatas=[{
-                        "file": chunk["file"],
-                        "start_line": chunk["start_line"],
-                        "end_line": chunk["end_line"],
-                        "type": chunk["type"],
-                    }],
+                    metadatas=[
+                        {
+                            "file": chunk["file"],
+                            "start_line": chunk["start_line"],
+                            "end_line": chunk["end_line"],
+                            "type": chunk["type"],
+                        }
+                    ],
                 )
                 added += 1
 

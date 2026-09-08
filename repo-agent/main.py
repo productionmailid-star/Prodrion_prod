@@ -2,6 +2,10 @@ import os
 import sys
 from pathlib import Path
 
+# Make the repo root importable so the shared `config` and `llm` packages
+# resolve when this CLI is run standalone from the repo-agent/ directory.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from agents.behaviour_locator import BehaviorLocator
 from agents.discovery import DiscoveryAgent
 from agents.goal_validator import GoalValidator

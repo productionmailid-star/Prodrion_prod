@@ -31,6 +31,7 @@ ignore = [
 "feedback_platform.py" = ["E741", "B905", "B904"]
 "reviewer.py" = ["E402"]
 "repo_agent_server.py" = ["E402"]
+"repo-agent/main.py" = ["E402"]
 "goal_to_repo_agent.py" = ["E741"]
 "repo-agent/agents/*.py" = ["E741"]
 "repo-agent/repo/*.py" = ["E741"]

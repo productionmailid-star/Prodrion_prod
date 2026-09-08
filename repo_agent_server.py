@@ -25,8 +25,10 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-# ── Make repo-agent importable ───────────────────────────────────────────────
-REPO_AGENT_DIR = Path(__file__).parent / "repo-agent"
+# ── Make repo-agent (and the repo root) importable ──────────────────────────
+REPO_ROOT = Path(__file__).resolve().parent
+REPO_AGENT_DIR = REPO_ROOT / "repo-agent"
+sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_AGENT_DIR))
 
 from agents.behaviour_locator import BehaviorLocator

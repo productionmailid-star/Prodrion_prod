@@ -2,26 +2,23 @@
 =============================================================================
 UNIFIED FEEDBACK INTELLIGENCE PLATFORM
 =============================================================================
-100% Free & Open-Source Stack:
-  - Ollama (local LLM)          → replaces GPT-4
-  - FAISS                       → replaces Pinecone
-  - SQLite + SQLAlchemy         → replaces managed Postgres
-  - APScheduler                 → replaces cron
-  - FastAPI                     → webhook receiver
-  - sentence-transformers       → embeddings
-  - HDBSCAN                     → drift detection clustering
+Stack:
+  - LLM + embeddings            → pluggable provider (llm.get_llm / get_embedder);
+                                  Gemini free-tier API by default, Ollama for local dev
+  - FAISS                       → in-process vector index
+  - SQLite                      → feedback / taxonomy / ticket store
+  - APScheduler                 → in-process polling + drift jobs
+  - FastAPI                     → webhook receiver + query API
+  - HDBSCAN                     → drift-detection clustering
   - BeautifulSoup4              → taxonomy bootstrapper scraper
-  - Slack SDK (free tier)       → alerts + ingestion
-  - google-play-scraper         → app store reviews
+  - Slack SDK                   → alerts + ingestion
+  - google-play-scraper         → Play Store reviews
   - app-store-scraper           → iOS reviews
 
 Install dependencies:
-  pip install fastapi uvicorn apscheduler sqlalchemy sentence-transformers \
-              faiss-cpu hdbscan scikit-learn requests beautifulsoup4 \
-              slack_sdk google-play-scraper app-store-scraper numpy
+  pip install -r requirements.txt
 
-Optional (for real Jira/Linear/Zendesk):
-  pip install jira requests
+Configuration: see config.Settings / .env.example (PRODRION_* variables).
 
 Run:
   python feedback_platform.py
@@ -48,9 +45,9 @@ import uvicorn
 from apscheduler.schedulers.background import BackgroundScheduler
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException, Request
-from sentence_transformers import SentenceTransformer
 
 from config import settings
+from llm import get_embedder, get_llm
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 log = logging.getLogger("feedback_platform")
@@ -129,12 +126,17 @@ def init_db():
 # =============================================================================
 
 class EmbeddingEngine:
+    """Thin adapter over the configured embedding provider (see llm.get_embedder).
+
+    Returns float32 numpy arrays so callers can persist them as BLOBs and feed
+    them straight into FAISS.
+    """
+
     _instance: EmbeddingEngine | None = None
     _lock = threading.Lock()
 
     def __init__(self):
-        log.info(f"Loading embedding model: {settings.embed_model}")
-        self.model = SentenceTransformer(settings.embed_model)
+        self._embedder = get_embedder()
 
     @classmethod
     def get(cls) -> EmbeddingEngine:
@@ -145,8 +147,7 @@ class EmbeddingEngine:
         return cls._instance
 
     def encode(self, texts: list[str]) -> np.ndarray:
-        vecs = self.model.encode(texts, show_progress_bar=False)
-        return np.array(vecs, dtype="float32")
+        return np.array(self._embedder.embed(texts), dtype="float32")
 
     def encode_one(self, text: str) -> np.ndarray:
         return self.encode([text])[0]
@@ -362,23 +363,17 @@ def poll_slack_channel(channel_id: str):
 # ENGINE 2: ADAPTIVE TAXONOMY ENGINE  (The "Brain")
 # =============================================================================
 
-def call_ollama(prompt: str, expect_json: bool = False) -> str:
-    """Call local Ollama LLM. Falls back to empty string on failure."""
+def call_llm(prompt: str, expect_json: bool = False) -> str:
+    """Call the configured LLM provider. Falls back to an empty string on failure."""
     try:
-        resp = requests.post(
-            settings.ollama_url,
-            json={"model": settings.ollama_model, "prompt": prompt, "stream": False},
-            timeout=300,
-        )
-        resp.raise_for_status()
-        text = resp.json().get("response", "").strip()
+        text = get_llm().generate(prompt).strip()
         if expect_json:
             # Strip markdown fences
             text = re.sub(r"^```[a-z]*\n?", "", text)
             text = re.sub(r"\n?```$", "", text)
         return text
     except Exception as e:
-        log.error(f"Ollama error: {e}")
+        log.error(f"LLM error: {e}")
         return ""
 
 # =============================================================================
@@ -482,7 +477,7 @@ taxonomy of product features and areas. Return ONLY valid JSON in this exact for
 Product text:
 {page_text}
 """
-    response = call_ollama(prompt, expect_json=True)
+    response = call_llm(prompt, expect_json=True)
     if not response:
         log.error("No taxonomy response from LLM.")
         return
@@ -544,7 +539,7 @@ Rules:
 - If nothing fits, use: {{"labels": ["General > Feedback > Uncategorized"]}}
 - No explanation, just JSON.
 """
-    response = call_ollama(prompt, expect_json=True)
+    response = call_llm(prompt, expect_json=True)
     try:
         data = extract_json_from_llm(response)
 
@@ -615,7 +610,7 @@ Samples:
 
 Return ONLY the label string, nothing else.
 """
-        suggestion = call_ollama(prompt).strip().strip('"')
+        suggestion = call_llm(prompt).strip().strip('"')
         if suggestion:
             suggestions.append({"cluster_size": int(mask.sum()), "suggested_label": suggestion})
             log.info(f"Drift detected → Suggested: '{suggestion}' ({int(mask.sum())} items)")
@@ -969,7 +964,7 @@ Rules:
 - Labels is a JSON text field — use LIKE '%value%' for filtering.
 - Limit results to 100 rows.
 """
-    sql = call_ollama(prompt).strip().rstrip(";").strip()
+    sql = call_llm(prompt).strip().rstrip(";").strip()
     sql = re.sub(r"^```[a-z]*\n?", "", sql)
     sql = re.sub(r"\n?```$", "", sql).strip()
 

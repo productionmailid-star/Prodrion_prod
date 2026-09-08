@@ -1,49 +1,22 @@
-import ollama
+"""LocalLLM — the repo-agent's text-generation entry point.
+
+Historically this wrapped Ollama/CodeLlama directly. It now delegates to the
+shared provider abstraction (``llm.get_llm``) so the whole product uses one
+configured model. The class name and ``chat(system, user, prefill)`` signature
+are kept so the agent modules need no changes.
+"""
+
+from __future__ import annotations
+
+from llm import get_llm
 
 
 class LocalLLM:
-    """
-    Thin wrapper around Ollama's chat API.
-    Defaults to codellama with low temperature for deterministic output.
-
-    Supports response prefilling: pass `prefill` to force the model to
-    begin its reply with a specific string, locking it into a format.
-    """
-
-    def __init__(self, model: str = "codellama", temperature: float = 0.1):
+    def __init__(self, model: str | None = None, temperature: float = 0.1):
+        # `model` is retained for call-site compatibility; the actual model is
+        # chosen by the configured provider.
         self.model = model
         self.temperature = temperature
 
     def chat(self, system: str, user: str, prefill: str = "") -> str:
-        """
-        Chat with optional prefill.
-
-        prefill: a string that is injected as the start of the assistant
-                 turn, forcing the model to continue from that prefix.
-                 This is the most reliable way to enforce output formats
-                 with instruction-tuned local models like CodeLlama.
-        """
-        messages = [
-            {"role": "system",    "content": system},
-            {"role": "user",      "content": user},
-        ]
-
-        if prefill:
-            messages.append({"role": "assistant", "content": prefill})
-
-        response = ollama.chat(
-            model=self.model,
-            messages=messages,
-            options={
-                "temperature": self.temperature,
-            },
-        )
-
-        content = response["message"]["content"]
-
-        # When prefill is used Ollama returns only the *continuation*,
-        # so we re-attach the prefix to give callers the full string.
-        if prefill:
-            content = prefill + content
-
-        return content
+        return get_llm().chat(system, user, prefill, temperature=self.temperature)

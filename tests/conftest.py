@@ -1,17 +1,20 @@
 """Shared test setup.
 
-The prototype imports a heavy dependency stack at module load time
-(``sentence_transformers``, ``faiss``, ``apscheduler``, ``uvicorn``,
-``ollama``). None of that is needed to exercise the pure functions these
-characterization tests cover, so we register lightweight stand-ins in
-``sys.modules`` before the modules under test are imported. Real packages,
-when installed, are left untouched.
+The application imports a few libraries at module load time (``faiss``,
+``apscheduler``, ``uvicorn``) that the pure code paths under test do not need,
+so we register lightweight stand-ins in ``sys.modules`` before the modules
+under test are imported. Real packages, when installed, are left untouched.
+
+The whole test run uses the offline ``fake`` LLM/embedding provider.
 """
 
 from __future__ import annotations
 
+import os
 import sys
 import types
+
+os.environ.setdefault("PRODRION_LLM_PROVIDER", "fake")
 
 
 def _ensure_stub(name: str, **attrs: object) -> types.ModuleType:
@@ -34,21 +37,11 @@ def _ensure_stub(name: str, **attrs: object) -> types.ModuleType:
     return mod
 
 
-class _FakeSentenceTransformer:
-    def __init__(self, *_args, **_kwargs):
-        pass
-
-    def encode(self, texts, **_kwargs):  # pragma: no cover - not called in unit tests
-        raise RuntimeError("embedding is stubbed out in tests")
-
-
 # --- feedback_platform.py heavy imports ------------------------------------
-_ensure_stub("sentence_transformers", SentenceTransformer=_FakeSentenceTransformer)
+# The LLM / embedding stack is exercised through the "fake" provider
+# (config PRODRION_LLM_PROVIDER), so only these remain to stub.
 _ensure_stub("faiss")
 _ensure_stub("apscheduler")
 _ensure_stub("apscheduler.schedulers")
 _ensure_stub("apscheduler.schedulers.background", BackgroundScheduler=object)
 _ensure_stub("uvicorn", run=lambda *a, **k: None)
-
-# --- repo-agent/agents/llm.py heavy import --------------------------------
-_ensure_stub("ollama", chat=lambda *a, **k: {"message": {"content": ""}})

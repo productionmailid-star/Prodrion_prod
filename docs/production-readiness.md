@@ -49,6 +49,7 @@ Deployment constraints that shape every recommendation:
 | 2.2 | Ingestion normalizers don't match the real Zendesk / App Store / HubSpot payloads. | quick fix |
 | 2.3 | No poll high-water-mark; fixed "last 1 hour" window overlaps and gaps. | quick fix |
 | 2.4 | `datetime.utcnow()` deprecated; mixed tz-awareness in stored timestamps. | quick fix |
+| 2.10 | Persisted embeddings are provider/model-specific (dimension + geometry). Switching `PRODRION_LLM_PROVIDER` or the embed model silently invalidates every stored `embedding` BLOB and breaks the FAISS rebuild / drift clustering. Needs an embed-model tag on stored rows + a re-embed path. Milestone 2 only documents it: wipe `feedback.embedding` / `jira_tickets.embedding` and re-ingest after a provider switch. | quick fix → milestone 4 |
 | 2.5 | `repo_agent_server` session dict leaks (run starts even if the stream is never opened) and can't survive restart. | quick fix |
 | 2.6 | Hardcoded values: `SOURCE_URL_MAP` pinned to `plausible.io`, silent demo-data fallback, ports/host, thresholds. | quick fix |
 | 2.7 | CORS unconfigured for the intended browser client. | quick fix |

@@ -17,9 +17,12 @@ from __future__ import annotations
 
 from enum import Enum
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+LLMProviderName = Literal["gemini", "ollama", "fake"]
 
 
 class Environment(str, Enum):
@@ -44,10 +47,19 @@ class Settings(BaseSettings):
     api_port: int = 8000
     db_path: str = "feedback_platform.db"
 
-    # ---- LLM / embeddings (Ollama today; hosted API arrives in milestone 2) ----
+    # ---- LLM / embeddings ----
+    # Provider for both generation and embeddings. "fake" is test-only.
+    llm_provider: LLMProviderName = "gemini"
+
+    # Gemini (free-tier API) — used when llm_provider == "gemini".
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-2.5-flash"
+    gemini_embed_model: str = "text-embedding-004"
+
+    # Ollama (local) — used when llm_provider == "ollama".
     ollama_url: str = "http://localhost:11434/api/generate"
     ollama_model: str = "llama3.2:latest"
-    embed_model: str = "BAAI/bge-small-en"
+    ollama_embed_model: str = "nomic-embed-text"
 
     # ---- Tuning knobs ----
     similarity_threshold: float = Field(0.85, ge=0.0, le=1.0)
@@ -108,6 +120,10 @@ class Settings(BaseSettings):
         problems: list[str] = []
         if self.load_demo_data:
             problems.append("PRODRION_LOAD_DEMO_DATA must be false in production")
+        if self.llm_provider == "fake":
+            problems.append("PRODRION_LLM_PROVIDER=fake is not allowed in production")
+        if self.llm_provider == "gemini" and not self.gemini_api_key:
+            problems.append("PRODRION_LLM_PROVIDER=gemini requires PRODRION_GEMINI_API_KEY")
         if self.zendesk_url and not (self.zendesk_email and self.zendesk_token):
             problems.append(
                 "PRODRION_ZENDESK_URL is set but ZENDESK_EMAIL/ZENDESK_TOKEN are missing"
