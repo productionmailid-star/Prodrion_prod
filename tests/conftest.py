@@ -58,6 +58,7 @@ def tmp_db(tmp_path, monkeypatch):
     appear.
     """
     import config as _config
+    import credits as _credits
     import db as _db
     import feedback_platform as _fp
     import jobs as _jobs
@@ -70,7 +71,7 @@ def tmp_db(tmp_path, monkeypatch):
         llm_provider="fake",
         db_path=str(tmp_path / "test.db"),
     )
-    for mod in (_config, _db, _jobs, _fp, _sec, _worker):
+    for mod in (_config, _credits, _db, _jobs, _fp, _sec, _worker):
         if hasattr(mod, "settings"):
             monkeypatch.setattr(mod, "settings", s, raising=False)
     monkeypatch.setattr(_sec, "get_settings", lambda: s)

@@ -46,8 +46,10 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from bs4 import BeautifulSoup
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 
+import credits
 import jobs
 from config import settings
+from credits import InsufficientCredits
 from db import (
     get_conn,
     get_sync_cursor,
@@ -335,6 +337,8 @@ def poll_zendesk():
         if newest != since:
             set_sync_cursor("zendesk", newest)
         log.info("Zendesk poll: ingested %d tickets.", count)
+    except InsufficientCredits as exc:
+        log.warning("Zendesk poll stopped: %s", exc)
     except Exception:
         log.exception("Zendesk poll failed")
 
@@ -352,6 +356,8 @@ def poll_app_store():
         log.info(f"App Store poll: ingested {len(app.reviews)} reviews.")
     except ImportError:
         log.warning("app-store-scraper not installed. Run: pip install app-store-scraper")
+    except InsufficientCredits as exc:
+        log.warning("App Store poll stopped: %s", exc)
     except Exception:
         log.exception("App Store poll failed")
 
@@ -370,6 +376,8 @@ def poll_play_store():
         log.info(f"Play Store poll: ingested {len(result)} reviews.")
     except ImportError:
         log.warning("google-play-scraper not installed. Run: pip install google-play-scraper")
+    except InsufficientCredits as exc:
+        log.warning("Play Store poll stopped: %s", exc)
     except Exception:
         log.exception("Play Store poll failed")
 
@@ -398,6 +406,8 @@ def poll_slack_channel(channel_id: str):
         log.info("Slack poll [%s]: ingested %d messages.", channel_id, ingested)
     except ImportError:
         log.warning("slack_sdk not installed. Run: pip install slack_sdk")
+    except InsufficientCredits as exc:
+        log.warning("Slack poll stopped: %s", exc)
     except Exception:
         log.exception("Slack poll failed")
 
@@ -1219,8 +1229,15 @@ def pipeline(fb: StandardFeedbackObject) -> StandardFeedbackObject:
     return fb
 
 
-def enqueue_feedback(fb: StandardFeedbackObject) -> str:
-    """Persist a normalised feedback item as a background job; returns its id."""
+def enqueue_feedback(fb: StandardFeedbackObject, workspace_id: str | None = None) -> str:
+    """Charge credits and queue a feedback item; returns the job id.
+
+    Raises credits.InsufficientCredits when the workspace is out of credits.
+    """
+    workspace_id = workspace_id or settings.default_workspace_id
+    credits.charge(
+        workspace_id, settings.credits_per_feedback, "ingest_feedback", ref=fb.id
+    )
     return jobs.enqueue("process_feedback", asdict(fb))
 
 
@@ -1264,7 +1281,10 @@ async def webhook_feedback(
         payload = json.loads(body)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON payload.") from None
-    job_id = enqueue_feedback(Normalizer.from_webhook(payload))
+    try:
+        job_id = enqueue_feedback(Normalizer.from_webhook(payload))
+    except InsufficientCredits as exc:
+        raise HTTPException(status_code=402, detail=str(exc)) from None
     return {"status": "queued", "job_id": job_id}
 
 
@@ -1286,7 +1306,10 @@ async def webhook_slack(request: Request):
         return {"challenge": payload["challenge"]}
     event = payload.get("event", {})
     if event.get("type") == "message" and not event.get("subtype"):
-        enqueue_feedback(Normalizer.from_slack(event))
+        try:
+            enqueue_feedback(Normalizer.from_slack(event))
+        except InsufficientCredits as exc:
+            log.warning("Dropped Slack event: %s", exc)
     return {"status": "ok"}
 
 
@@ -1331,6 +1354,52 @@ async def import_users(request: Request):
         raise HTTPException(status_code=400, detail="body must be UTF-8 CSV text") from None
     count = import_users_from_csv_text(csv_text)
     return {"status": "imported", "rows": count}
+
+
+@app.get("/credits", dependencies=_ADMIN)
+async def get_credits(workspace_id: str | None = None):
+    ws = workspace_id or settings.default_workspace_id
+    return {
+        "workspace_id": ws,
+        "enabled": settings.credits_enabled,
+        "balance": credits.get_balance(ws),
+        "ledger": credits.ledger(ws),
+    }
+
+
+@app.post("/admin/credits/grant", dependencies=_ADMIN)
+async def grant_credits(request: Request):
+    """Add credits to a workspace (admin / promo / manual top-up).
+
+    Body: {"workspace_id"?: str, "amount": int, "reason"?: str}
+    """
+    body = json.loads(await _read_capped_body(request))
+    ws = body.get("workspace_id") or settings.default_workspace_id
+    try:
+        amount = int(body["amount"])
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="amount (positive int) is required") from None
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="amount must be positive")
+    reason = str(body.get("reason") or "admin_grant")
+    return {"workspace_id": ws, "balance": credits.grant(ws, amount, reason)}
+
+
+@app.post("/webhook/stripe", dependencies=_ADMIN)
+async def webhook_stripe(request: Request):
+    """Stripe checkout webhook — STUB.
+
+    TODO(billing): verify the real Stripe-Signature header and map a
+    checkout.session.completed event to credits.grant(). For now this is
+    bearer-authed and accepts {"workspace_id", "credits"} so credits can be
+    granted through the same path a payment eventually will.
+    """
+    body = json.loads(await _read_capped_body(request))
+    ws = body.get("workspace_id") or settings.default_workspace_id
+    amount = int(body.get("credits") or 0)
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="credits (positive int) is required")
+    return {"workspace_id": ws, "balance": credits.grant(ws, amount, "stripe_stub")}
 
 
 @app.get("/jobs/{job_id}", dependencies=_ADMIN)

@@ -183,6 +183,7 @@ async def test_size_limit_passes_small_request():
 
 @pytest.fixture
 def api(tmp_db, monkeypatch):
+    import credits as _credits
     import db as _db
     import feedback_platform as fp
     import jobs as _jobs
@@ -193,7 +194,7 @@ def api(tmp_db, monkeypatch):
         api_auth_token="sekret",
         webhook_secret="hook",
     )
-    for mod in (_db, _jobs, fp):
+    for mod in (_db, _jobs, _credits, fp):
         monkeypatch.setattr(mod, "settings", s)
     monkeypatch.setattr(security, "get_settings", lambda: s)
 

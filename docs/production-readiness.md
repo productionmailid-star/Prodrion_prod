@@ -38,7 +38,11 @@ Deployment constraints that shape every recommendation:
 > `PRODRION_LOG_LEVEL`/`LOG_FORMAT`, `X-Request-ID` propagation, consistent JSON
 > error bodies that don't leak internals, optional Sentry); `except` blocks now
 > log with tracebacks instead of swallowing; `/health` checks the DB and reports
-> queue depth. 1.2–1.4, 1.7–1.9 outstanding.
+> queue depth.
+> 1.4 addressed in milestone 7a: server-authoritative `credits.py` ledger,
+> billable actions charge before enqueue, `/webhook/feedback` returns 402 when
+> out of credits; Supabase `billing`/`dashboard_stats` lockdown SQL in
+> docs/credits-and-billing.md (run manually). 1.2, 1.3, 1.7-1.9 outstanding.
 
 | ID | Issue | Fix type |
 | --- | --- | --- |

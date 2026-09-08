@@ -88,6 +88,26 @@ CREATE TABLE IF NOT EXISTS sync_state (
     updated_at TEXT DEFAULT (datetime('now'))
 );
 
+-- Server-authoritative credit balance per workspace.
+CREATE TABLE IF NOT EXISTS credit_accounts (
+    workspace_id TEXT PRIMARY KEY,
+    balance      INTEGER NOT NULL DEFAULT 0,
+    updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Append-only credit movements (grants and charges).
+CREATE TABLE IF NOT EXISTS credit_ledger (
+    id            TEXT PRIMARY KEY,
+    workspace_id  TEXT NOT NULL,
+    delta         INTEGER NOT NULL,
+    balance_after INTEGER NOT NULL,
+    reason        TEXT NOT NULL,
+    ref           TEXT,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS ix_credit_ledger_ws
+    ON credit_ledger(workspace_id, created_at DESC);
+
 -- Durable background job queue (drained by worker.py).
 CREATE TABLE IF NOT EXISTS jobs (
     id           TEXT PRIMARY KEY,

@@ -71,6 +71,13 @@ class Settings(BaseSettings):
     # bundled repo-agent/ directory, resolved at runtime).
     repo_agent_allowed_base: str = ""
 
+    # ---- Credits / billing ----
+    # When false, charge() is a no-op (dev / single-tenant without billing).
+    credits_enabled: bool = False
+    default_workspace_id: str = "default"
+    credits_per_feedback: int = Field(1, ge=0)
+    credits_per_repo_analysis: int = Field(25, ge=0)
+
     # ---- Background worker / job queue ----
     worker_poll_interval_seconds: float = Field(1.0, gt=0.0)
     job_max_attempts: int = Field(5, ge=1)

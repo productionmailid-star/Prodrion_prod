@@ -33,7 +33,7 @@ jobs:
       - name: Black (format check)
         run: >-
           black --check tests/ config.py security.py db.py jobs.py worker.py
-          observability.py llm/
+          observability.py credits.py llm/
 
       - name: Pytest
         run: pytest

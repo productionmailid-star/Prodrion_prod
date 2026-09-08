@@ -22,6 +22,9 @@ def test_expected_routes_present():
         "/import-users",
         "/jobs",
         "/jobs/{job_id}",
+        "/credits",
+        "/admin/credits/grant",
+        "/webhook/stripe",
         "/health",
     }:
         assert expected in paths
