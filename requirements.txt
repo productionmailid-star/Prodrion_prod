@@ -12,6 +12,11 @@ sentry-sdk>=2.0.0
 pyjwt>=2.8.0
 cryptography>=42.0.0
 
+# repo-agent code analysis (scan -> chunk -> index -> plan)
+chromadb>=0.4.0
+tree-sitter>=0.21.0
+tree-sitter-language-pack>=0.1.0
+
 # Scheduler (in-process polling + drift jobs)
 apscheduler>=3.10.0
 

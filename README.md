@@ -59,11 +59,11 @@ code each consume credits from a server-held ledger.
 
 ## Deployment
 
-Backend and AI orchestration run on a **single Ubuntu VM** (Azure, funded by the
-GitHub Student Pack credit). LLM inference is delegated to a **hosted API**;
-the VM runs the FastAPI service, a background worker, the SQLite/Postgres store,
-and the on-disk vector index. The frontend is served as static files and talks
-to Supabase directly for auth and application data.
+One Ubuntu VPS (Hostinger KVM 4) runs the API (`prodrion-api`), the background
+worker (`prodrion-worker`), SQLite, and the on-disk vector indexes; nginx
+terminates TLS and serves the static dashboard. LLM inference is the Gemini
+free-tier API. See [`docs/deployment.md`](docs/deployment.md) and the
+[`deploy/`](deploy/) directory (systemd units, nginx config, `deploy.sh`).
 
 ## Processes
 

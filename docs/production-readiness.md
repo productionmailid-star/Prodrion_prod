@@ -105,4 +105,4 @@ model; add a
 | 6 | Errors, logging, observability | Narrow exceptions + handlers, JSON logs + request IDs, `/health` checks, optional Sentry. |
 | 7 | GitHub App + credit ledger | Install flow, encrypted token storage, sandboxed clone + analysis, PR/ticket creation, atomic credit ledger, RLS lockdown. Own design note first. |
 | 8 | Frontend hardening | Build Tailwind, pin Supabase SDK + SRI, seed zeros, wire dashboard to the API, CORS allow-list. |
-| 9 | Deploy | systemd units, nginx + TLS, deploy script, runbook. |
+| 9 | Deploy | systemd units, nginx + TLS, deploy script, runbook. **Done** — `deploy/` + `docs/deployment.md`. |

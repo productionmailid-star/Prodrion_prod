@@ -1,0 +1,31 @@
+[Unit]
+Description=Prodrion API (FastAPI / uvicorn)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=prodrion
+Group=prodrion
+WorkingDirectory=/opt/prodrion
+EnvironmentFile=/etc/prodrion/prodrion.env
+ExecStart=/opt/prodrion/.venv/bin/uvicorn feedback_platform:app \
+    --host 127.0.0.1 --port 8000 --workers 2 --proxy-headers \
+    --forwarded-allow-ips 127.0.0.1
+Restart=always
+RestartSec=3
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/prodrion/var
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

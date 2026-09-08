@@ -1,7 +1,3 @@
-# Repo-agent — additional dependencies (on top of the root requirements.txt,
-# which provides the shared config + llm provider stack).
-# Install with: pip install -r requirements.txt -r repo-agent/requirements.txt
-
-chromadb>=0.4.0
-tree-sitter>=0.21.0
-tree-sitter-language-pack>=0.1.0
+# repo-agent dependencies are now part of the root requirements.txt
+# (chromadb, tree-sitter, tree-sitter-language-pack). This file is kept for
+# reference; `pip install -r requirements.txt` at the repo root is enough.

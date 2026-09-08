@@ -1,0 +1,30 @@
+[Unit]
+Description=Prodrion background worker (job queue + scheduler)
+After=network-online.target prodrion-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=prodrion
+Group=prodrion
+# var/ holds the SQLite DB, the ChromaDB index (./chroma_db), and gh-clones.
+WorkingDirectory=/opt/prodrion/var
+EnvironmentFile=/etc/prodrion/prodrion.env
+ExecStart=/opt/prodrion/.venv/bin/python /opt/prodrion/worker.py
+Restart=always
+RestartSec=3
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/prodrion/var
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
