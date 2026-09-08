@@ -8,6 +8,10 @@ pydantic-settings>=2.0.0
 # Error reporting — only used when PRODRION_SENTRY_DSN is set
 sentry-sdk>=2.0.0
 
+# GitHub App auth (installation JWT)
+pyjwt>=2.8.0
+cryptography>=42.0.0
+
 # Scheduler (in-process polling + drift jobs)
 apscheduler>=3.10.0
 

@@ -1241,6 +1241,28 @@ def enqueue_feedback(fb: StandardFeedbackObject, workspace_id: str | None = None
     return jobs.enqueue("process_feedback", asdict(fb))
 
 
+def enqueue_repo_analysis(
+    installation_id: str, repo_full_name: str, goal: str, workspace_id: str | None = None
+) -> str:
+    """Charge credits and queue a repo-analysis -> GitHub issue job."""
+    workspace_id = workspace_id or settings.default_workspace_id
+    credits.charge(
+        workspace_id,
+        settings.credits_per_repo_analysis,
+        "repo_analysis",
+        ref=repo_full_name,
+    )
+    return jobs.enqueue(
+        "analyze_repo",
+        {
+            "workspace_id": workspace_id,
+            "installation_id": installation_id,
+            "repo_full_name": repo_full_name,
+            "goal": goal,
+        },
+    )
+
+
 # =============================================================================
 # FASTAPI WEBHOOK RECEIVER  (Engine 1B)
 # =============================================================================
@@ -1400,6 +1422,28 @@ async def webhook_stripe(request: Request):
     if amount <= 0:
         raise HTTPException(status_code=400, detail="credits (positive int) is required")
     return {"workspace_id": ws, "balance": credits.grant(ws, amount, "stripe_stub")}
+
+
+@app.post("/repo-analysis", status_code=202, dependencies=_ADMIN)
+async def repo_analysis(request: Request):
+    """Queue a repo-analysis job that opens a GitHub issue with a suggested patch.
+
+    Body: {"installation_id", "repo_full_name", "goal", "workspace_id"?}
+    """
+    body = json.loads(await _read_capped_body(request))
+    for key in ("installation_id", "repo_full_name", "goal"):
+        if not body.get(key):
+            raise HTTPException(status_code=400, detail=f"{key} is required")
+    try:
+        job_id = enqueue_repo_analysis(
+            str(body["installation_id"]),
+            body["repo_full_name"],
+            body["goal"],
+            body.get("workspace_id"),
+        )
+    except InsufficientCredits as exc:
+        raise HTTPException(status_code=402, detail=str(exc)) from None
+    return {"status": "queued", "job_id": job_id}
 
 
 @app.get("/jobs/{job_id}", dependencies=_ADMIN)

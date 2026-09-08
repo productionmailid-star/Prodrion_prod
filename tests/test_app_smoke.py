@@ -25,6 +25,7 @@ def test_expected_routes_present():
         "/credits",
         "/admin/credits/grant",
         "/webhook/stripe",
+        "/repo-analysis",
         "/health",
     }:
         assert expected in paths

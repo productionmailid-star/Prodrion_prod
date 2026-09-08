@@ -25,20 +25,12 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-# ── Make repo-agent (and the repo root) importable ──────────────────────────
+# ── Make the repo root importable ──────────────────────────────────────────
 REPO_ROOT = Path(__file__).resolve().parent
 REPO_AGENT_DIR = REPO_ROOT / "repo-agent"
 sys.path.insert(0, str(REPO_ROOT))
-sys.path.insert(0, str(REPO_AGENT_DIR))
 
-from agents.behaviour_locator import BehaviorLocator
-from agents.discovery import DiscoveryAgent
-from agents.goal_validator import GoalValidator
-from agents.planner import ChangePlanner
-from repo.chunker import CodeChunker
-from repo.indexer import CodeIndexer
-from repo.scanner import RepoScanner
-
+import repo_agent_core
 from config import settings
 from security import require_bearer_token
 
@@ -145,84 +137,19 @@ async def stream(session_id: str):
 
 # ── Pipeline (runs in thread pool) ───────────────────────────────────────────
 def _run_pipeline(goal: str, repo_path: str, queue: asyncio.Queue):
-    """
-    Executes the full repo-agent pipeline synchronously.
-    Pushes SSE events onto `queue` as work completes.
-    """
+    """Run the repo-agent pipeline and stream SSE events onto `queue`."""
 
     def push(event_type: str, data: dict):
-        """Thread-safe enqueue."""
         loop = asyncio.get_event_loop()
         loop.call_soon_threadsafe(queue.put_nowait, {"type": event_type, "data": data})
 
     try:
-        # ── 1. Scan ──────────────────────────────────────────────────────
-        scanner = RepoScanner(repo_path)
-        files = scanner.scan_files()
-
-        if not files:
-            push("done", {"error": "No supported source files found in repo."})
+        result = repo_agent_core.analyze(repo_path, goal)
+        if result["status"] != "ok":
+            push("done", {"error": result.get("error", result["status"])})
             return
-
-        # ── 2. Chunk ─────────────────────────────────────────────────────
-        chunker = CodeChunker()
-        all_chunks = []
-        for file in files:
-            full_path = Path(repo_path) / file
-            all_chunks.extend(chunker.chunk_file(full_path))
-
-        # ── 3. Index ─────────────────────────────────────────────────────
-        indexer = CodeIndexer()
-        if indexer.is_empty():
-            indexer.add_chunks(all_chunks)
-        # (reuse existing index if present — keeps the server fast)
-
-        # ── 4. Validate goal ─────────────────────────────────────────────
-        validator = GoalValidator(files)
-        status = validator.validate(goal).upper()
-
-        if "INVALID" in status:
-            push("done", {
-                "error": "Goal is not compatible with this repository architecture.",
-                "status": status,
-            })
-            return
-
-        # ── 5. Discover relevant files ───────────────────────────────────
-        discovery = DiscoveryAgent(indexer, files, repo_path)
-        discovered_files = discovery.discover(goal)
-
-        if not discovered_files:
-            push("done", {"error": "No relevant files found for this goal."})
-            return
-
-        # ── 6. Locate target lines ───────────────────────────────────────
-        locator = BehaviorLocator(repo_path)
-        hits = locator.locate(goal, discovered_files)
-
-        # ── 7. Plan changes ──────────────────────────────────────────────
-        planner = ChangePlanner(repo_path)
-        patches = planner.plan(goal, hits)
-
-        # Build a serialisable plan summary
-        plan = {
-            "goal": goal,
-            "files_to_modify": discovered_files,
-            "hit_count": len(hits),
-        }
-
-        push("plan", {"plan": plan})
-
-        # Build serialisable results
-        results = []
-        for patch in patches:
-            results.append({
-                "warnings": patch.get("warnings", []),
-                "patch": patch.get("patch", ""),
-            })
-
-        push("results", {"results": results})
+        push("plan", {"plan": result["plan"]})
+        push("results", {"results": result["results"]})
         push("done", {})
-
     except Exception as exc:
         push("done", {"error": str(exc)})

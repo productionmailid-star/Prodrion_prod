@@ -43,6 +43,55 @@ def _process_feedback(payload: dict) -> None:
     fp.pipeline(fp.StandardFeedbackObject(**payload))
 
 
+def _issue_body(goal: str, result: dict) -> str:
+    lines = [
+        f"**Goal:** {goal}",
+        "",
+        f"Files to review: {', '.join(result['plan']['files_to_modify']) or '(none)'}",
+        "",
+        "_AI-generated suggestion — review before applying._",
+        "",
+    ]
+    for i, entry in enumerate(result.get("results", []), 1):
+        lines.append(f"### Change {i}")
+        for w in entry.get("warnings", []):
+            lines.append(f"> ⚠ {w}")
+        lines.append("```diff")
+        lines.append(entry.get("patch", "").strip())
+        lines.append("```")
+        lines.append("")
+    return "\n".join(lines)
+
+
+@handler("analyze_repo")
+def _analyze_repo(payload: dict) -> None:
+    import shutil
+    from pathlib import Path
+
+    import github_app
+    import repo_agent_core
+
+    inst = str(payload["installation_id"])
+    repo = payload["repo_full_name"]
+    goal = payload["goal"]
+    safe = repo.replace("/", "__")
+    dest = Path(settings.github_clone_dir).resolve() / inst / safe
+
+    github_app.clone_repo(inst, repo, dest)
+    try:
+        result = repo_agent_core.analyze(str(dest), goal)
+    finally:
+        shutil.rmtree(dest, ignore_errors=True)
+
+    if result["status"] != "ok":
+        raise RuntimeError(f"repo analysis failed: {result.get('error', result['status'])}")
+
+    issue = github_app.create_issue(
+        inst, repo, f"[Prodrion] {goal[:70]}", _issue_body(goal, result)
+    )
+    log.info("analyze_repo -> %s issue #%s", repo, issue.get("number"))
+
+
 def _dispatch(job: dict) -> None:
     fn = _HANDLERS.get(job["type"])
     if fn is None:

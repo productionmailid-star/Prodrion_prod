@@ -42,7 +42,12 @@ Deployment constraints that shape every recommendation:
 > 1.4 addressed in milestone 7a: server-authoritative `credits.py` ledger,
 > billable actions charge before enqueue, `/webhook/feedback` returns 402 when
 > out of credits; Supabase `billing`/`dashboard_stats` lockdown SQL in
-> docs/credits-and-billing.md (run manually). 1.2, 1.3, 1.7-1.9 outstanding.
+> docs/credits-and-billing.md (run manually).
+> 1.9 addressed in milestone 7b: `github_app.py` (app JWT, in-memory
+> installation-token cache, sandboxed shallow clone with a size cap,
+> issue creation, webhook-signature verify) + an `analyze_repo` job type that
+> clones -> runs the repo-agent -> opens a GitHub issue with the patch.
+> 1.2, 1.3, 1.7, 1.8 outstanding.
 
 | ID | Issue | Fix type |
 | --- | --- | --- |

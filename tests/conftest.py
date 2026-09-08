@@ -61,6 +61,7 @@ def tmp_db(tmp_path, monkeypatch):
     import credits as _credits
     import db as _db
     import feedback_platform as _fp
+    import github_app as _gh
     import jobs as _jobs
     import security as _sec
     import worker as _worker
@@ -70,8 +71,9 @@ def tmp_db(tmp_path, monkeypatch):
         environment="development",
         llm_provider="fake",
         db_path=str(tmp_path / "test.db"),
+        github_clone_dir=str(tmp_path / "gh-clones"),
     )
-    for mod in (_config, _credits, _db, _jobs, _fp, _sec, _worker):
+    for mod in (_config, _credits, _db, _jobs, _fp, _gh, _sec, _worker):
         if hasattr(mod, "settings"):
             monkeypatch.setattr(mod, "settings", s, raising=False)
     monkeypatch.setattr(_sec, "get_settings", lambda: s)

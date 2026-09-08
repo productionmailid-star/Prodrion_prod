@@ -49,7 +49,10 @@ code each consume credits from a server-held ledger.
 | `feedback_platform.py` | Ingestion + bucketing engine. FastAPI service, SQLite store, scheduled pollers, revenue/velocity reporting, natural-language query. |
 | `reviewer.py` | Multi-platform review fetching (Google Play, App Store, Reddit) and negative-review filtering. |
 | `repo-agent/` | Local code-analysis pipeline: scans a repository, indexes it, and produces line-specific change suggestions for a goal. Read-only — never writes to the target repo. |
-| `repo_agent_server.py` | FastAPI wrapper that exposes the `repo-agent/` pipeline over HTTP + SSE. |
+| `repo_agent_core.py` | Synchronous `analyze(repo_path, goal)` wrapper around the `repo-agent/` pipeline, used by the worker and the SSE server. |
+| `repo_agent_server.py` | FastAPI wrapper that exposes the pipeline over HTTP + SSE. |
+| `github_app.py` | GitHub App auth (installation JWT + token cache), sandboxed shallow clone of a user repo, and issue creation. |
+| `credits.py` | Server-authoritative credit ledger — billable actions charge before work is queued. |
 | `goal_to_repo_agent.py` | Connector: turns bucketed feedback labels into goals and runs them through `repo_agent_server.py`. |
 | `web/` | Frontend: landing page, auth, and the workspace dashboard. Backed by Supabase (auth + application database). |
 | `injection.py` | Dev scratch — pushes GitHub issues into the feedback webhook for local testing. Not part of the product. |

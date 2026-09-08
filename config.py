@@ -71,6 +71,17 @@ class Settings(BaseSettings):
     # bundled repo-agent/ directory, resolved at runtime).
     repo_agent_allowed_base: str = ""
 
+    # ---- GitHub App (repo read + ticket/PR creation) ----
+    github_api_url: str = "https://api.github.com"
+    github_app_id: str = ""
+    # PEM contents, or a path to a .pem file.
+    github_app_private_key: str = ""
+    github_webhook_secret: str = ""
+    github_clone_max_bytes: int = Field(50_000_000, ge=1_000_000)
+    github_clone_timeout_seconds: float = Field(120.0, gt=0.0)
+    # Scratch directory that user-repo clones are confined to.
+    github_clone_dir: str = "var/gh-clones"
+
     # ---- Credits / billing ----
     # When false, charge() is a no-op (dev / single-tenant without billing).
     credits_enabled: bool = False

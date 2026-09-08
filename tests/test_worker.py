@@ -56,6 +56,40 @@ def test_unknown_job_type_is_marked_failed(tmp_db):
     assert "no handler" in job["last_error"]
 
 
+def test_analyze_repo_job_creates_issue(tmp_db, tmp_path, monkeypatch):
+    import github_app
+    import repo_agent_core
+
+    cloned = tmp_path / "clone"
+    cloned.mkdir()
+    (cloned / "x.py").write_text("def f():\n    return 1\n")
+
+    monkeypatch.setattr(github_app, "clone_repo", lambda i, r, d: cloned)
+    monkeypatch.setattr(
+        repo_agent_core,
+        "analyze",
+        lambda path, goal: {
+            "status": "ok",
+            "plan": {"goal": goal, "files_to_modify": ["x.py"], "hit_count": 1},
+            "results": [{"warnings": [], "patch": "- old\n+ new"}],
+        },
+    )
+    created = {}
+    monkeypatch.setattr(
+        github_app,
+        "create_issue",
+        lambda i, r, title, body: created.update(repo=r, title=title, body=body) or {"number": 9},
+    )
+
+    jid = fp.enqueue_repo_analysis("777", "acme/app", "Fix the SSO timeout")
+    _drain_one()
+
+    assert jobs.get_job(jid)["status"] == "done"
+    assert created["repo"] == "acme/app"
+    assert "SSO timeout" in created["title"]
+    assert "```diff" in created["body"]
+
+
 def test_run_forever_stops_on_event(tmp_db):
     seen: list[str] = []
 

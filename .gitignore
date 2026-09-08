@@ -25,6 +25,7 @@ secrets.json
 *.sqlite
 *.sqlite3
 chroma_db/
+var/
 *_negative_reviews.json
 
 # ---- Tooling caches ----

@@ -25,6 +25,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install fastapi pydantic-settings numpy requests beautifulsoup4 \
+                      pyjwt cryptography \
                       pytest pytest-asyncio httpx ruff black
 
       - name: Ruff (lint)
@@ -33,7 +34,7 @@ jobs:
       - name: Black (format check)
         run: >-
           black --check tests/ config.py security.py db.py jobs.py worker.py
-          observability.py credits.py llm/
+          observability.py credits.py github_app.py repo_agent_core.py llm/
 
       - name: Pytest
         run: pytest
