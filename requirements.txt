@@ -5,6 +5,9 @@ uvicorn[standard]>=0.29.0
 # Configuration (typed settings from env / .env)
 pydantic-settings>=2.0.0
 
+# Error reporting — only used when PRODRION_SENTRY_DSN is set
+sentry-sdk>=2.0.0
+
 # Scheduler (in-process polling + drift jobs)
 apscheduler>=3.10.0
 

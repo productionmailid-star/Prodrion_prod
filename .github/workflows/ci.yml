@@ -31,7 +31,9 @@ jobs:
         run: ruff check .
 
       - name: Black (format check)
-        run: black --check tests/ config.py security.py db.py jobs.py worker.py llm/
+        run: >-
+          black --check tests/ config.py security.py db.py jobs.py worker.py
+          observability.py llm/
 
       - name: Pytest
         run: pytest

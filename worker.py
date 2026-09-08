@@ -20,6 +20,7 @@ import threading
 import jobs
 from config import settings
 from db import init_db
+from observability import configure_logging, set_request_id
 
 log = logging.getLogger("prodrion.worker")
 
@@ -66,6 +67,7 @@ def run_forever(stop: threading.Event, worker_id: str | None = None) -> None:
             stop.wait(idle)
             continue
 
+        set_request_id(job["id"])
         try:
             _dispatch(job)
         except Exception as exc:
@@ -74,15 +76,14 @@ def run_forever(stop: threading.Event, worker_id: str | None = None) -> None:
         else:
             jobs.mark_done(job["id"])
             log.info("Job %s (%s) done", job["id"], job["type"])
+        finally:
+            set_request_id("-")
 
     log.info("Worker %s stopped", worker_id)
 
 
 def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
+    configure_logging()
     log.info("=" * 60)
     log.info("  PRODRION WORKER")
     log.info("=" * 60)

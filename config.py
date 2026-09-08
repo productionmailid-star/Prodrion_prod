@@ -42,6 +42,12 @@ class Settings(BaseSettings):
 
     environment: Environment = Environment.development
 
+    # ---- Observability ----
+    service_name: str = "prodrion"
+    log_level: str = "INFO"
+    log_format: Literal["text", "json"] = "text"  # production should use "json"
+    sentry_dsn: str = ""  # when set, errors are reported to Sentry
+
     # ---- Core API service ----
     api_host: str = "127.0.0.1"  # set to 0.0.0.0 in production, behind a proxy
     api_port: int = 8000
@@ -128,6 +134,14 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.environment is Environment.production
+
+    @field_validator("log_level")
+    @classmethod
+    def _valid_log_level(cls, value: str) -> str:
+        value = value.upper()
+        if value not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+            raise ValueError("log_level must be one of DEBUG/INFO/WARNING/ERROR/CRITICAL")
+        return value
 
     @field_validator(
         "taxonomy_bootstrap_url", "zendesk_url", "jira_url", "feedback_api_url", "repo_agent_url"

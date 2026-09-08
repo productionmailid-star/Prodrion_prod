@@ -56,6 +56,11 @@ from db import (
     utc_now_iso,
 )
 from llm import get_embedder, get_llm
+from observability import (
+    RequestIdMiddleware,
+    configure_logging,
+    install_exception_handlers,
+)
 from security import (
     RequestSizeLimitMiddleware,
     is_safe_public_url,
@@ -64,7 +69,7 @@ from security import (
     verify_webhook_secret,
 )
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+configure_logging()
 log = logging.getLogger("feedback_platform")
 
 # Configuration lives in config.Settings; the DB connection + schema layer is in
@@ -330,8 +335,8 @@ def poll_zendesk():
         if newest != since:
             set_sync_cursor("zendesk", newest)
         log.info("Zendesk poll: ingested %d tickets.", count)
-    except Exception as e:
-        log.error(f"Zendesk poll failed: {e}")
+    except Exception:
+        log.exception("Zendesk poll failed")
 
 
 def poll_app_store():
@@ -347,8 +352,8 @@ def poll_app_store():
         log.info(f"App Store poll: ingested {len(app.reviews)} reviews.")
     except ImportError:
         log.warning("app-store-scraper not installed. Run: pip install app-store-scraper")
-    except Exception as e:
-        log.error(f"App Store poll failed: {e}")
+    except Exception:
+        log.exception("App Store poll failed")
 
 
 def poll_play_store():
@@ -365,8 +370,8 @@ def poll_play_store():
         log.info(f"Play Store poll: ingested {len(result)} reviews.")
     except ImportError:
         log.warning("google-play-scraper not installed. Run: pip install google-play-scraper")
-    except Exception as e:
-        log.error(f"Play Store poll failed: {e}")
+    except Exception:
+        log.exception("Play Store poll failed")
 
 
 def poll_slack_channel(channel_id: str):
@@ -393,8 +398,8 @@ def poll_slack_channel(channel_id: str):
         log.info("Slack poll [%s]: ingested %d messages.", channel_id, ingested)
     except ImportError:
         log.warning("slack_sdk not installed. Run: pip install slack_sdk")
-    except Exception as e:
-        log.error(f"Slack poll failed: {e}")
+    except Exception:
+        log.exception("Slack poll failed")
 
 
 # =============================================================================
@@ -411,7 +416,7 @@ def call_llm(prompt: str, expect_json: bool = False) -> str:
             text = re.sub(r"\n?```$", "", text)
         return text
     except Exception as e:
-        log.error(f"LLM error: {e}")
+        log.warning("LLM provider call failed: %s", e)
         return ""
 
 # =============================================================================
@@ -441,7 +446,7 @@ def extract_json_from_llm(text: str):
     try:
         return json.loads(candidate)
     except Exception as e:
-        log.error(f"JSON recovery failed: {e}")
+        log.warning("Could not parse JSON from LLM output: %s", e)
         return None
 
 
@@ -493,8 +498,8 @@ def bootstrap_taxonomy_from_url(url: str):
         for tag in soup(["script", "style", "nav", "footer", "header"]):
             tag.decompose()
         page_text = soup.get_text(separator=" ", strip=True)[:4000]
-    except Exception as e:
-        log.error(f"Failed to scrape {url}: {e}")
+    except Exception:
+        log.exception("Failed to scrape %s", url)
         return
 
     prompt = f"""
@@ -540,8 +545,8 @@ Product text:
                      node.get("level3"), node.get("description")),
                 )
         log.info(f"Taxonomy bootstrapped with {len(nodes)} nodes.")
-    except Exception as e:
-        log.error(f"Taxonomy parse failed: {e}\nRaw: {response}")
+    except Exception:
+        log.exception("Taxonomy parse failed. Raw response: %s", response)
 
 
 def get_taxonomy_labels() -> list[str]:
@@ -765,8 +770,8 @@ def sync_hubspot_contacts():
                     (email, arr, plan, company),
                 )
         log.info(f"HubSpot sync: updated {len(contacts)} contacts.")
-    except Exception as e:
-        log.error(f"HubSpot sync failed: {e}")
+    except Exception:
+        log.exception("HubSpot sync failed")
 
 
 # ---- Component C: Revenue Aggregator --------------------------------------
@@ -918,8 +923,8 @@ def sync_jira_tickets():
         _upsert_tickets(issues)
         VECTOR_STORE.rebuild_from_db()
         log.info(f"Jira sync: indexed {len(issues)} tickets.")
-    except Exception as e:
-        log.error(f"Jira sync failed: {e}")
+    except Exception:
+        log.exception("Jira sync failed")
 
 
 def _upsert_tickets(issues: list[dict]):
@@ -1021,7 +1026,7 @@ def send_slack_alert(message: str):
     except ImportError:
         log.warning("slack_sdk not installed.")
     except Exception as e:
-        log.error(f"Slack alert failed: {e}")
+        log.warning("Slack alert failed: %s", e)
 
 
 # ---- Component A: Text-to-SQL Query Interface ----------------------------
@@ -1225,6 +1230,8 @@ def enqueue_feedback(fb: StandardFeedbackObject) -> str:
 
 app = FastAPI(title="Feedback Intelligence Platform", version="1.0.0")
 app.add_middleware(RequestSizeLimitMiddleware, max_bytes=settings.max_request_bytes)
+app.add_middleware(RequestIdMiddleware)
+install_exception_handlers(app)
 
 # Dependency list applied to every admin / query endpoint.
 _ADMIN = [Depends(require_bearer_token)]
