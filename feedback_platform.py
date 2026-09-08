@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import sqlite3
 import threading
@@ -44,10 +43,17 @@ import requests
 import uvicorn
 from apscheduler.schedulers.background import BackgroundScheduler
 from bs4 import BeautifulSoup
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 
 from config import settings
 from llm import get_embedder, get_llm
+from security import (
+    RequestSizeLimitMiddleware,
+    is_safe_public_url,
+    require_bearer_token,
+    verify_slack_signature,
+    verify_webhook_secret,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 log = logging.getLogger("feedback_platform")
@@ -444,6 +450,9 @@ def bootstrap_taxonomy_from_url(url: str):
     Scrape a public URL (help docs / pricing page) and ask the LLM to build
     a 3-level taxonomy. Stores results in the taxonomy table.
     """
+    if not is_safe_public_url(url):
+        log.error("Refusing to fetch taxonomy source %r: not a public http(s) URL.", url)
+        return
     log.info(f"Bootstrapping taxonomy from: {url}")
     try:
         resp = requests.get(url, timeout=30)
@@ -648,29 +657,38 @@ def resolve_user_revenue(fb: StandardFeedbackObject) -> StandardFeedbackObject:
     return fb
 
 
-def import_users_from_csv(csv_path: str):
+def import_users_from_csv_text(csv_text: str) -> int:
     """
-    Bulk-import users from a CSV with columns: email, user_id, arr, plan_type, company.
-    Free alternative to CRM API — just export from HubSpot/Salesforce as CSV.
+    Bulk-import users from CSV text with columns:
+    email, user_id, arr, plan_type, company.
+
+    Returns the number of rows imported.
     """
     import csv
+    import io
+
     count = 0
-    with open(csv_path, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        with get_conn() as conn:
-            for row in reader:
-                conn.execute(
-                    "INSERT OR REPLACE INTO users (email, user_id, arr, plan_type, company) VALUES (?,?,?,?,?)",
-                    (
-                        row.get("email", ""),
-                        row.get("user_id", ""),
-                        float(row.get("arr", 0) or 0),
-                        row.get("plan_type", ""),
-                        row.get("company", ""),
-                    ),
-                )
-                count += 1
-    log.info(f"Imported {count} users from {csv_path}")
+    reader = csv.DictReader(io.StringIO(csv_text))
+    with get_conn() as conn:
+        for row in reader:
+            try:
+                arr = float(row.get("arr", 0) or 0)
+            except (TypeError, ValueError):
+                arr = 0.0
+            conn.execute(
+                "INSERT OR REPLACE INTO users "
+                "(email, user_id, arr, plan_type, company) VALUES (?,?,?,?,?)",
+                (
+                    row.get("email", ""),
+                    row.get("user_id", ""),
+                    arr,
+                    row.get("plan_type", ""),
+                    row.get("company", ""),
+                ),
+            )
+            count += 1
+    log.info("Imported %d users from uploaded CSV.", count)
+    return count
 
 
 # ---- Component B: CRM Sync (HubSpot free tier) ----------------------------
@@ -928,13 +946,27 @@ def send_slack_alert(message: str):
 
 # ---- Component A: Text-to-SQL Query Interface ----------------------------
 
+def _open_readonly_conn() -> sqlite3.Connection:
+    """A read-only SQLite connection for untrusted (LLM-generated) queries."""
+    conn = sqlite3.connect(
+        f"file:{settings.db_path}?mode=ro", uri=True, check_same_thread=False
+    )
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only = ON")
+    return conn
+
+
+# Substrings that must never appear in an LLM-generated query.
+_SQL_DENYLIST = ("attach", "pragma", "sqlite_", "load_extension", "--", "/*")
+
+
 def chat_with_data(natural_language_query: str) -> dict:
     """
-    Converts a natural language question into SQL, runs it on SQLite,
-    returns results. Uses local Ollama instead of GPT-4 — 100% free.
+    Convert a natural-language question into a single read-only SQL SELECT,
+    run it against a read-only connection with a hard row cap and wall-clock
+    budget, and return the rows.
 
-    Example:
-      "Show me all login issues from Enterprise customers last week"
+    Defence in depth only — this endpoint is also behind bearer auth.
     """
     schema_hint = """
 Table: feedback
@@ -964,21 +996,33 @@ Rules:
 - Labels is a JSON text field — use LIKE '%value%' for filtering.
 - Limit results to 100 rows.
 """
-    sql = call_llm(prompt).strip().rstrip(";").strip()
+    sql = call_llm(prompt).strip()
     sql = re.sub(r"^```[a-z]*\n?", "", sql)
     sql = re.sub(r"\n?```$", "", sql).strip()
+    # One statement only; drop anything after the first ';'.
+    sql = sql.split(";", 1)[0].strip()
 
-    if not sql.upper().startswith("SELECT"):
-        return {"error": "LLM did not produce a valid SELECT query.", "raw": sql}
+    if not re.match(r"(?is)^\s*(select|with)\b", sql):
+        return {"error": "LLM did not produce a SELECT query.", "raw": sql}
+    lowered = sql.lower()
+    if any(token in lowered for token in _SQL_DENYLIST):
+        return {"error": "Query rejected by safety filter.", "raw": sql}
 
+    # Enforce a hard row cap regardless of any LIMIT the model wrote.
+    capped_sql = f"SELECT * FROM (\n{sql}\n) LIMIT {settings.query_row_cap}"
+
+    conn = _open_readonly_conn()
+    deadline = time.monotonic() + settings.query_timeout_seconds
+    conn.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0, 10_000)
     try:
-        with get_conn() as conn:
-            cursor = conn.execute(sql)
-            columns = [d[0] for d in cursor.description]
-            rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        cursor = conn.execute(capped_sql)
+        columns = [d[0] for d in cursor.description]
+        rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
         return {"query": sql, "columns": columns, "rows": rows, "count": len(rows)}
     except Exception as e:
         return {"error": str(e), "query": sql}
+    finally:
+        conn.close()
 
 
 # ---- Component B: Trend / Velocity Watcher --------------------------------
@@ -1094,15 +1138,36 @@ def pipeline(fb: StandardFeedbackObject) -> StandardFeedbackObject:
 # =============================================================================
 
 app = FastAPI(title="Feedback Intelligence Platform", version="1.0.0")
+app.add_middleware(RequestSizeLimitMiddleware, max_bytes=settings.max_request_bytes)
+
+# Dependency list applied to every admin / query endpoint.
+_ADMIN = [Depends(require_bearer_token)]
+
+
+async def _read_capped_body(request: Request) -> bytes:
+    """Read the request body, rejecting anything over the configured cap.
+
+    The size middleware already handles requests that declare Content-Length;
+    this also covers chunked bodies with no declared length.
+    """
+    body = await request.body()
+    if len(body) > settings.max_request_bytes:
+        raise HTTPException(status_code=413, detail="request body too large")
+    return body
 
 
 @app.post("/webhook/feedback")
-async def webhook_feedback(request: Request):
-    """Generic webhook endpoint. Accepts any JSON payload."""
+async def webhook_feedback(
+    request: Request,
+    x_webhook_secret: str | None = Header(default=None, alias="X-Webhook-Secret"),
+):
+    """Generic webhook endpoint. Accepts any JSON payload. Requires X-Webhook-Secret."""
+    verify_webhook_secret(x_webhook_secret)
+    body = await _read_capped_body(request)
     try:
-        payload = await request.json()
+        payload = json.loads(body)
     except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON payload.")
+        raise HTTPException(status_code=400, detail="Invalid JSON payload.") from None
     fb = Normalizer.from_webhook(payload)
     fb = pipeline(fb)
     return {
@@ -1116,8 +1181,17 @@ async def webhook_feedback(request: Request):
 
 @app.post("/webhook/slack")
 async def webhook_slack(request: Request):
-    """Slack Events API endpoint."""
-    payload = await request.json()
+    """Slack Events API endpoint. Verifies the Slack request signature."""
+    body = await _read_capped_body(request)
+    verify_slack_signature(
+        body,
+        request.headers.get("X-Slack-Request-Timestamp"),
+        request.headers.get("X-Slack-Signature"),
+    )
+    try:
+        payload = json.loads(body)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload.") from None
     # Slack URL verification challenge
     if "challenge" in payload:
         return {"challenge": payload["challenge"]}
@@ -1128,39 +1202,47 @@ async def webhook_slack(request: Request):
     return {"status": "ok"}
 
 
-@app.get("/query")
+@app.get("/query", dependencies=_ADMIN)
 async def query_data(q: str):
     """Natural language query interface. e.g. ?q=Show me all login issues from Enterprise users"""
     return chat_with_data(q)
 
 
-@app.get("/revenue-impact")
+@app.get("/revenue-impact", dependencies=_ADMIN)
 async def revenue_impact(top_n: int = 20):
     """Returns issues ranked by revenue impact (COUNT * ARR)."""
     return {"report": get_revenue_impact_report(top_n)}
 
 
-@app.post("/bootstrap-taxonomy")
+@app.post("/bootstrap-taxonomy", dependencies=_ADMIN)
 async def bootstrap_taxonomy(url: str):
     """Scrape a URL and auto-generate the product taxonomy."""
+    if not is_safe_public_url(url):
+        raise HTTPException(status_code=400, detail="url must be a public http(s) URL")
     bootstrap_taxonomy_from_url(url)
     return {"status": "taxonomy bootstrapped", "url": url}
 
 
-@app.get("/taxonomy")
+@app.get("/taxonomy", dependencies=_ADMIN)
 async def get_taxonomy():
     with get_conn() as conn:
         rows = conn.execute("SELECT * FROM taxonomy").fetchall()
     return {"taxonomy": [dict(r) for r in rows]}
 
 
-@app.post("/import-users")
-async def import_users(csv_path: str):
-    """Import users + ARR data from a CSV file path on disk."""
-    if not os.path.exists(csv_path):
-        raise HTTPException(status_code=404, detail=f"File not found: {csv_path}")
-    import_users_from_csv(csv_path)
-    return {"status": "imported", "file": csv_path}
+@app.post("/import-users", dependencies=_ADMIN)
+async def import_users(request: Request):
+    """Import users + ARR from a CSV request body (Content-Type: text/csv).
+
+    Columns: email, user_id, arr, plan_type, company.
+    """
+    body = await _read_capped_body(request)
+    try:
+        csv_text = body.decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="body must be UTF-8 CSV text") from None
+    count = import_users_from_csv_text(csv_text)
+    return {"status": "imported", "rows": count}
 
 
 @app.get("/health")

@@ -21,7 +21,7 @@ import sys
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -39,6 +39,9 @@ from repo.chunker import CodeChunker
 from repo.indexer import CodeIndexer
 from repo.scanner import RepoScanner
 
+from config import settings
+from security import require_bearer_token
+
 # ── App ──────────────────────────────────────────────────────────────────────
 app = FastAPI(title="Repo Agent Server", version="1.0.0")
 
@@ -46,9 +49,25 @@ app = FastAPI(title="Repo Agent Server", version="1.0.0")
 _sessions: dict[str, asyncio.Queue] = {}
 
 # ── Config ───────────────────────────────────────────────────────────────────
-# Override with the path you want the agent to analyse.
-# Can also be set via the POST /api/run body.
 DEFAULT_REPO_PATH = str(REPO_AGENT_DIR)
+
+
+def _resolve_allowed_repo_path(requested: str | None) -> str:
+    """Confine the analysed path to a directory inside the allowed base.
+
+    Prevents a caller from pointing the scanner/indexer at arbitrary
+    directories on the host.
+    """
+    base = Path(settings.repo_agent_allowed_base or DEFAULT_REPO_PATH).resolve()
+    target = Path(requested).resolve() if requested else base
+    if target != base and base not in target.parents:
+        raise HTTPException(
+            status_code=400,
+            detail=f"repo_path must be inside {base}",
+        )
+    if not target.is_dir():
+        raise HTTPException(status_code=400, detail="repo_path is not a directory")
+    return str(target)
 
 
 # ── Schemas ──────────────────────────────────────────────────────────────────
@@ -70,13 +89,14 @@ def health():
 
 
 # ── Run (start pipeline) ─────────────────────────────────────────────────────
-@app.post("/api/run", response_model=RunResponse)
+@app.post("/api/run", response_model=RunResponse, dependencies=[Depends(require_bearer_token)])
 async def run(req: RunRequest):
+    repo_path = _resolve_allowed_repo_path(req.repo_path)
+
     session_id = str(uuid.uuid4())
     queue: asyncio.Queue = asyncio.Queue()
     _sessions[session_id] = queue
 
-    repo_path = req.repo_path or DEFAULT_REPO_PATH
     loop = asyncio.get_event_loop()
 
     # Run the blocking pipeline in a thread so we don't block the event loop
@@ -86,7 +106,7 @@ async def run(req: RunRequest):
 
 
 # ── SSE stream ───────────────────────────────────────────────────────────────
-@app.get("/api/stream/{session_id}")
+@app.get("/api/stream/{session_id}", dependencies=[Depends(require_bearer_token)])
 async def stream(session_id: str):
     if session_id not in _sessions:
         raise HTTPException(status_code=404, detail="Session not found")

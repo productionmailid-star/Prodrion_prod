@@ -47,6 +47,22 @@ class Settings(BaseSettings):
     api_port: int = 8000
     db_path: str = "feedback_platform.db"
 
+    # ---- API security ----
+    # Bearer token for the admin/query endpoints. Required in production.
+    api_auth_token: str = ""
+    # Shared secret for POST /webhook/feedback (X-Webhook-Secret header).
+    webhook_secret: str = ""
+    # Slack signing secret for POST /webhook/slack signature verification.
+    slack_signing_secret: str = ""
+    # Reject request bodies larger than this (bytes).
+    max_request_bytes: int = Field(1_048_576, ge=1024)
+    # Hard row cap and wall-clock budget for the natural-language /query endpoint.
+    query_row_cap: int = Field(100, ge=1, le=10_000)
+    query_timeout_seconds: float = Field(5.0, gt=0.0)
+    # repo-agent may only analyse paths under this directory (blank -> the
+    # bundled repo-agent/ directory, resolved at runtime).
+    repo_agent_allowed_base: str = ""
+
     # ---- LLM / embeddings ----
     # Provider for both generation and embeddings. "fake" is test-only.
     llm_provider: LLMProviderName = "gemini"
@@ -124,6 +140,10 @@ class Settings(BaseSettings):
             problems.append("PRODRION_LLM_PROVIDER=fake is not allowed in production")
         if self.llm_provider == "gemini" and not self.gemini_api_key:
             problems.append("PRODRION_LLM_PROVIDER=gemini requires PRODRION_GEMINI_API_KEY")
+        if not self.api_auth_token:
+            problems.append("PRODRION_API_AUTH_TOKEN is required in production")
+        if not self.webhook_secret:
+            problems.append("PRODRION_WEBHOOK_SECRET is required in production")
         if self.zendesk_url and not (self.zendesk_email and self.zendesk_token):
             problems.append(
                 "PRODRION_ZENDESK_URL is set but ZENDESK_EMAIL/ZENDESK_TOKEN are missing"

@@ -19,6 +19,10 @@ Deployment constraints that shape every recommendation:
 
 ## P0 — Blockers
 
+> Status: 0.1, 0.2, 0.3, 0.5 addressed in milestone 3; 0.4 in milestone 1.
+> Follow-ups tracked below (repo-agent path allow-list will tighten further
+> once user repos are cloned into a per-workspace sandbox in milestone 7).
+
 | ID | Issue | Fix type |
 | --- | --- | --- |
 | 0.1 | **No auth on the Python API.** Every endpoint is open; `host=0.0.0.0`. Full read of feedback/emails/ARR and destructive writes to anyone who can reach the port. | architectural (interim: static bearer token + bind localhost) |

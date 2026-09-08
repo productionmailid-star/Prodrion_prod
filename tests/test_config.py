@@ -7,8 +7,13 @@ import pytest
 from config import Environment, Settings
 
 # conftest sets PRODRION_LLM_PROVIDER=fake for the run; production checks below
-# pass an explicit llm config so they exercise the real coherence rules.
-_PROD_LLM = {"llm_provider": "gemini", "gemini_api_key": "test-key"}
+# pass an explicit coherent baseline so they exercise one rule at a time.
+_PROD_LLM = {
+    "llm_provider": "gemini",
+    "gemini_api_key": "test-key",
+    "api_auth_token": "admin-token",
+    "webhook_secret": "hook-secret",
+}
 
 
 def _settings(**overrides):
