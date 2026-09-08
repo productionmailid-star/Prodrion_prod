@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>ProdMind - AI Product Intelligence</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet"/>
+<script>
+  tailwind.config = {
+    darkMode:"class",
+    theme:{extend:{colors:{"primary":"#1f7a63","primary-dark":"#165948","background-light":"#ffffff","background-subtle":"#F9FAFB","background-dark":"#131f1c","text-main":"#121716","text-muted":"#6B7280"},fontFamily:{"display":["Inter","sans-serif"],"body":["Inter","sans-serif"]},boxShadow:{"soft":"0 4px 6px -1px rgba(0,0,0,0.05)","glow":"0 0 15px rgba(31,122,99,0.15)"}}}
+  }
+</script>
+<style>
+  body{font-family:'Inter',sans-serif;-webkit-font-smoothing:antialiased;min-height:max(884px,100dvh);}
+</style>
+</head>
+<body class="bg-background-light dark:bg-background-dark text-text-main dark:text-white overflow-x-hidden">
+<nav class="sticky top-0 z-50 bg-white/80 dark:bg-background-dark/80 backdrop-blur-md border-b border-gray-100 dark:border-gray-800">
+<div class="flex items-center justify-between px-4 py-3 max-w-7xl mx-auto">
+<div class="flex items-center gap-2">
+<svg class="shrink-0" fill="none" height="32" viewBox="0 0 32 32" width="32" xmlns="http://www.w3.org/2000/svg">
+<rect fill="#1F7A63" height="24" rx="1" width="6" x="2" y="4"/>
+<path d="M12 14H28C28.5 14 29 13.5 29 13C29 9.5 26.5 6 22 6C20 6 18.5 7 18 8C17.5 7 16 6 14 6C11 6 10 8.5 10 11V14H12Z" stroke="#4B5563" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5"/>
+<circle cx="14" cy="20" fill="#4B5563" r="1.5"/><circle cx="22" cy="21" fill="#4B5563" r="1.5"/>
+</svg>
+<h2 class="text-text-main dark:text-white text-lg font-bold tracking-tight">ProdMind</h2>
+</div>
+<a class="text-sm font-semibold text-text-main hover:text-primary transition-colors" id="nav-auth-link" href="auth/auth-v2.html">Sign up / Log in</a>
+</div>
+</nav>
+<main class="flex flex-col w-full max-w-7xl mx-auto">
+<!-- Hero -->
+<section class="flex flex-col px-4 pt-12 pb-8 md:pt-20 md:pb-16 md:px-8 text-center md:text-left gap-6 md:grid md:grid-cols-2 md:items-center">
+<div class="flex flex-col gap-6">
+<div class="inline-flex items-center justify-center md:justify-start gap-1.5 px-3 py-1 rounded-full bg-background-subtle border border-gray-200 w-fit mx-auto md:mx-0">
+<span class="text-[10px] font-bold uppercase tracking-wider text-primary">New</span>
+<span class="text-xs text-text-muted">Linear Integration 2.0 is live</span>
+</div>
+<h1 class="text-4xl md:text-6xl font-extrabold text-text-main dark:text-white leading-[1.1] tracking-tight">
+  Ship what matters.<br/>
+  <span class="text-transparent bg-clip-text bg-gradient-to-r from-primary to-emerald-400">AI-driven product intelligence.</span>
+</h1>
+<p class="text-lg text-text-muted dark:text-gray-400 leading-relaxed max-w-md mx-auto md:mx-0">Turn messy customer feedback into actionable specs in seconds. Stop guessing what to build next.</p>
+<div class="flex flex-col sm:flex-row gap-3 pt-2 w-full md:w-auto">
+  <a href="auth/auth-v2.html">
+    <button class="h-12 px-6 rounded-lg bg-primary hover:bg-primary-dark text-white font-semibold text-base transition-all shadow-glow flex items-center justify-center gap-2">Start for free <span class="material-symbols-outlined text-[18px]">chevron_right</span></button>
+  </a>
+  <button class="h-12 px-6 rounded-lg bg-gray-50 hover:bg-gray-100 text-text-main border border-gray-200 font-semibold text-base transition-all flex items-center justify-center gap-2"><span class="material-symbols-outlined text-[18px]">play_circle</span>View Demo</button>
+</div>
+<div class="flex items-center justify-center md:justify-start gap-4 text-sm text-text-muted pt-2">
+<div class="flex items-center gap-1"><span class="material-symbols-outlined text-[16px] text-primary">check_circle</span><span>No credit card</span></div>
+<div class="flex items-center gap-1"><span class="material-symbols-outlined text-[16px] text-primary">check_circle</span><span>14-day trial</span></div>
+</div>
+</div>
+<div class="relative mt-8 md:mt-0 w-full aspect-[4/3] rounded-xl overflow-hidden shadow-2xl border border-gray-200/50 bg-white">
+<div class="absolute inset-0 bg-gradient-to-br from-gray-50 to-white">
+<div class="h-12 border-b border-gray-100 flex items-center px-4 gap-2"><div class="w-3 h-3 rounded-full bg-red-400"></div><div class="w-3 h-3 rounded-full bg-amber-400"></div><div class="w-3 h-3 rounded-full bg-green-400"></div></div>
+<div class="p-6 flex flex-col gap-4">
+<div class="h-8 w-1/3 bg-gray-100 rounded animate-pulse"></div>
+<div class="grid grid-cols-3 gap-3">
+<div class="h-20 bg-emerald-50 rounded-lg border border-emerald-100"></div>
+<div class="h-20 bg-blue-50 rounded-lg border border-blue-100"></div>
+<div class="h-20 bg-amber-50 rounded-lg border border-amber-100"></div>
+</div>
+<div class="h-4 w-2/3 bg-gray-100 rounded"></div>
+<div class="h-4 w-1/2 bg-gray-100 rounded"></div>
+</div>
+</div>
+</div>
+</section>
+
+<!-- Capabilities -->
+<section class="px-4 py-16">
+<div class="text-center mb-10"><h3 class="text-2xl font-bold mb-2">Capabilities</h3><p class="text-text-muted">Everything you need to manage the product lifecycle.</p></div>
+<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+<div class="group p-6 rounded-xl bg-white border border-gray-200 hover:border-primary/50 transition-colors"><div class="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center text-primary mb-4 group-hover:scale-110 transition-transform"><span class="material-symbols-outlined">sentiment_satisfied</span></div><h4 class="font-bold text-lg mb-2">Sentiment Analysis</h4><p class="text-sm text-text-muted">Understand how users feel about your features in real-time with NLP.</p></div>
+<div class="group p-6 rounded-xl bg-white border border-gray-200 hover:border-primary/50 transition-colors"><div class="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center text-primary mb-4 group-hover:scale-110 transition-transform"><span class="material-symbols-outlined">map</span></div><h4 class="font-bold text-lg mb-2">Roadmap Optimization</h4><p class="text-sm text-text-muted">Prioritize features based on actual user demand and business value impact.</p></div>
+<div class="group p-6 rounded-xl bg-white border border-gray-200 hover:border-primary/50 transition-colors"><div class="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center text-primary mb-4 group-hover:scale-110 transition-transform"><span class="material-symbols-outlined">article</span></div><h4 class="font-bold text-lg mb-2">Automated PRDs</h4><p class="text-sm text-text-muted">Skip the blank page. Get structured requirement documents generated instantly.</p></div>
+<div class="group p-6 rounded-xl bg-white border border-gray-200 hover:border-primary/50 transition-colors"><div class="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center text-primary mb-4 group-hover:scale-110 transition-transform"><span class="material-symbols-outlined">group_work</span></div><h4 class="font-bold text-lg mb-2">Team Collaboration</h4><p class="text-sm text-text-muted">Comment, tag, and approve specs with your engineering and design partners.</p></div>
+<div class="group p-6 rounded-xl bg-white border border-gray-200 hover:border-primary/50 transition-colors"><div class="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center text-primary mb-4 group-hover:scale-110 transition-transform"><span class="material-symbols-outlined">integration_instructions</span></div><h4 class="font-bold text-lg mb-2">Deep Integrations</h4><p class="text-sm text-text-muted">Seamlessly sync with Linear, Jira, Slack, and your data warehouse.</p></div>
+<div class="group p-6 rounded-xl bg-white border border-gray-200 hover:border-primary/50 transition-colors"><div class="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center text-primary mb-4 group-hover:scale-110 transition-transform"><span class="material-symbols-outlined">security</span></div><h4 class="font-bold text-lg mb-2">Enterprise Security</h4><p class="text-sm text-text-muted">SOC2 Type II compliant. Your data is encrypted and secure at all times.</p></div>
+</div>
+</section>
+
+<!-- CTA -->
+<section class="px-4 py-20 bg-text-main text-white mt-10 mb-10 rounded-none md:rounded-3xl mx-0 md:mx-4 text-center">
+<h2 class="text-3xl md:text-5xl font-bold mb-6 tracking-tight">Ready to build better products?</h2>
+<p class="text-gray-400 max-w-lg mx-auto mb-8 text-lg">Join 2,000+ product managers shipping faster with ProdMind today.</p>
+<div class="flex flex-col sm:flex-row items-center justify-center gap-4">
+<a href="auth/auth-v2.html"><button class="w-full sm:w-auto h-14 px-8 rounded-lg bg-primary hover:bg-primary-dark text-white font-bold text-lg transition-all">Get Started for Free</button></a>
+<button class="w-full sm:w-auto h-14 px-8 rounded-lg bg-transparent hover:bg-white/10 text-white border border-gray-600 font-bold text-lg transition-all">Book a Demo</button>
+</div>
+</section>
+
+<footer class="border-t border-gray-200 pt-10 pb-10 px-4">
+<div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-8 mb-8">
+<span class="font-bold text-lg">ProdMind</span>
+<div class="flex gap-8 text-sm text-text-muted"><a class="hover:text-primary" href="#">Features</a><a class="hover:text-primary" href="#">Pricing</a><a class="hover:text-primary" href="#">Changelog</a><a class="hover:text-primary" href="#">Docs</a></div>
+</div>
+<div class="flex flex-col md:flex-row justify-between items-center text-xs text-text-muted gap-4">
+<p>© 2025 ProdMind Inc. All rights reserved.</p>
+<div class="flex gap-4"><a class="hover:underline" href="#">Privacy Policy</a><a class="hover:underline" href="#">Terms of Service</a></div>
+</div>
+</footer>
+</main>
+
+<script>
+const SUPABASE_URL  = 'https://nbpmkvpeqtvtczlqgwax.supabase.co';
+const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5icG1rdnBlcXR2dGN6bHFnd2F4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzIxMTYzNjQsImV4cCI6MjA4NzY5MjM2NH0.isx0SkgR5eRqhaYedTpInqu7cO6cti5fNALagOU2Xj0';
+
+const { createClient } = supabase;
+const sb = createClient(SUPABASE_URL, SUPABASE_ANON);
+(async () => {
+  const { data: { session } } = await sb.auth.getSession();
+  const navLink = document.getElementById('nav-auth-link');
+  if (session && navLink) { navLink.textContent = 'Dashboard →'; navLink.href = 'dashboard.html'; }
+})();
+</script>
+</body></html>

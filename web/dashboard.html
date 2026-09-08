@@ -1,0 +1,1393 @@
+<!DOCTYPE html>
+<html class="light" lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+  <title>ProdMind AI</title>
+  <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet"/>
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet"/>
+  <script>
+    tailwind.config = {
+      darkMode: "class",
+      theme: {
+        extend: {
+          colors: {
+            "primary": "#1f7a63",
+            "background-light": "#f6f8f7",
+            "border-light": "#e2e8e7",
+          },
+          fontFamily: { "display": ["Inter", "sans-serif"] },
+        },
+      },
+    }
+  </script>
+  <style>
+    body { font-family: 'Inter', sans-serif; }
+    .material-symbols-outlined { font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24; }
+    .nav-active { background-color: rgba(31,122,99,0.12); color: #1f7a63; border-right: 3px solid #1f7a63; font-weight: 600; }
+    .nav-active .material-symbols-outlined { color: #1f7a63; }
+    .page { display: none; }
+    .page.active { display: block; }
+    .badge-green  { background:#dcfce7; color:#16a34a; }
+    .badge-red    { background:#fee2e2; color:#dc2626; }
+    .badge-blue   { background:#dbeafe; color:#2563eb; }
+    .badge-amber  { background:#fef3c7; color:#d97706; }
+    .badge-slate  { background:#f1f5f9; color:#64748b; }
+    ::-webkit-scrollbar { width:4px; }
+    ::-webkit-scrollbar-track { background:transparent; }
+    ::-webkit-scrollbar-thumb { background:#d1d5db; border-radius:4px; }
+    /* Toast */
+    #toast { position:fixed; bottom:24px; right:24px; z-index:9999; display:flex; flex-direction:column; gap:10px; pointer-events:none; }
+    .toast-item { padding:12px 18px; border-radius:12px; font-size:13px; font-weight:600; color:#fff; background:#1f7a63; box-shadow:0 8px 24px rgba(0,0,0,.15); transform:translateX(120%); transition:transform .3s cubic-bezier(.34,1.56,.64,1); pointer-events:none; display:flex; align-items:center; gap:8px; }
+    .toast-item.show { transform:translateX(0); }
+    .toast-item.error { background:#dc2626; }
+    /* Spinner */
+    .spinner { width:16px; height:16px; border:2px solid rgba(255,255,255,.4); border-top-color:#fff; border-radius:50%; animation:spin .7s linear infinite; }
+    @keyframes spin { to { transform:rotate(360deg); } }
+    /* Skeleton */
+    .skeleton { background:linear-gradient(90deg,#f0f0f0 25%,#e0e0e0 50%,#f0f0f0 75%); background-size:200% 100%; animation:shimmer 1.2s infinite; border-radius:6px; }
+    @keyframes shimmer { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
+  </style>
+</head>
+<body class="bg-background-light text-slate-900 font-display">
+<div class="flex h-screen overflow-hidden">
+
+  <!-- ══════════════════════ SIDEBAR ══════════════════════ -->
+  <aside class="w-56 flex-shrink-0 border-r border-border-light bg-white flex flex-col">
+    <div class="px-5 py-4 flex items-center gap-3 border-b border-border-light">
+      <div class="h-8 w-8 bg-primary rounded-lg flex items-center justify-center text-white">
+        <span class="material-symbols-outlined text-[20px]">psychology</span>
+      </div>
+      <span class="text-lg font-black tracking-tight uppercase italic">ProdMind</span>
+    </div>
+    <nav class="flex-1 px-3 py-4 space-y-0.5 overflow-y-auto">
+      <a href="#" class="nav-link nav-active flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-all" data-page="dashboard">
+        <span class="material-symbols-outlined text-[20px]">dashboard</span> Dashboard
+      </a>
+      <a href="#" class="nav-link flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-slate-500 hover:bg-slate-50 transition-all" data-page="hooks">
+        <span class="material-symbols-outlined text-[20px]">link</span> Hooks
+      </a>
+      <a href="#" class="nav-link flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-slate-500 hover:bg-slate-50 transition-all" data-page="config">
+        <span class="material-symbols-outlined text-[20px]">settings_input_component</span> Config
+      </a>
+      <a href="#" class="nav-link flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-slate-500 hover:bg-slate-50 transition-all" data-page="keys">
+        <span class="material-symbols-outlined text-[20px]">key</span> Keys
+      </a>
+      <a href="#" class="nav-link flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-slate-500 hover:bg-slate-50 transition-all" data-page="settings">
+        <span class="material-symbols-outlined text-[20px]">settings</span> Settings
+      </a>
+      <a href="#" class="nav-link flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-slate-500 hover:bg-slate-50 transition-all" data-page="billing">
+        <span class="material-symbols-outlined text-[20px]">credit_card</span> Billing
+      </a>
+    </nav>
+    <div class="p-3 border-t border-border-light">
+      <div class="flex items-center gap-2.5 p-2 rounded-xl bg-slate-50">
+        <div id="user-avatar" class="h-8 w-8 rounded-full bg-primary flex items-center justify-center text-white text-xs font-bold flex-shrink-0">?</div>
+        <div class="flex-1 min-w-0">
+          <p class="text-xs font-semibold truncate" id="user-name">Loading…</p>
+          <p class="text-[10px] text-slate-400 truncate" id="user-email">—</p>
+        </div>
+        <button onclick="signOut()" title="Sign out" class="p-1 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50 transition-colors">
+          <span class="material-symbols-outlined text-[18px]">logout</span>
+        </button>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ══════════════════════ MAIN ══════════════════════ -->
+  <main class="flex-1 flex flex-col min-w-0 overflow-hidden bg-background-light">
+    <header class="h-14 flex-shrink-0 flex items-center justify-between px-7 bg-white border-b border-border-light">
+      <div class="flex items-center gap-3">
+        <h2 id="page-title" class="text-base font-bold">Dashboard</h2>
+        <span id="page-badge" class="px-2 py-0.5 bg-primary/10 text-primary text-[10px] font-bold rounded-full uppercase">Overview</span>
+      </div>
+      <div class="flex items-center gap-2">
+        <div class="relative">
+          <span class="material-symbols-outlined absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 text-[18px]">search</span>
+          <input class="bg-slate-100 border-none rounded-lg py-1.5 pl-8 pr-4 text-sm focus:ring-2 focus:ring-primary/20 outline-none placeholder:text-slate-400 w-48" placeholder="Search…" type="text"/>
+        </div>
+        <button class="p-1.5 rounded-lg text-slate-400 hover:bg-slate-100 relative transition-colors">
+          <span class="material-symbols-outlined text-[20px]">notifications</span>
+          <span class="absolute top-1.5 right-1.5 size-1.5 bg-red-500 rounded-full"></span>
+        </button>
+        <button class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-primary text-white text-xs font-bold hover:bg-primary/90 transition-colors shadow-sm">
+          <span class="material-symbols-outlined text-[16px]">auto_awesome</span> Ask AI
+        </button>
+      </div>
+    </header>
+
+    <div class="flex-1 overflow-y-auto">
+
+      <!-- ══════════════════════ DASHBOARD ══════════════════════ -->
+      <div id="page-dashboard" class="page active p-7 space-y-7">
+        <div>
+          <h2 class="text-2xl font-black" id="dashboard-greeting">Good morning 👋</h2>
+          <p class="text-slate-400 text-sm mt-1" id="dash-subtitle">ProdMind is analyzing your customer signals.</p>
+        </div>
+        <!-- Stat cards -->
+        <div class="grid grid-cols-2 lg:grid-cols-4 gap-5">
+          <div class="bg-white border border-border-light rounded-xl p-5 shadow-sm">
+            <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Signals Processed</p>
+            <p class="text-3xl font-black" id="stat-signals">—</p>
+            <p class="text-xs text-green-600 font-semibold mt-1 flex items-center gap-0.5"><span class="material-symbols-outlined text-[14px]">trending_up</span><span id="stat-signals-change">—</span></p>
+          </div>
+          <div class="bg-white border border-border-light rounded-xl p-5 shadow-sm">
+            <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Feature Ops</p>
+            <p class="text-3xl font-black" id="stat-feature-ops">—</p>
+            <p class="text-xs text-green-600 font-semibold mt-1 flex items-center gap-0.5"><span class="material-symbols-outlined text-[14px]">trending_up</span><span id="stat-feature-ops-change">—</span></p>
+          </div>
+          <div class="bg-white border border-border-light rounded-xl p-5 shadow-sm">
+            <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Active Experiments</p>
+            <p class="text-3xl font-black" id="stat-experiments">—</p>
+            <p class="text-xs text-slate-400 font-semibold mt-1">No change</p>
+          </div>
+          <div class="bg-white border border-primary/20 bg-primary/5 rounded-xl p-5 shadow-sm">
+            <p class="text-[10px] font-black text-primary uppercase tracking-widest mb-2 flex items-center gap-1"><span class="material-symbols-outlined text-[14px]">auto_awesome</span>AI Recs</p>
+            <p class="text-3xl font-black" id="stat-ai-recs">—</p>
+            <p class="text-xs text-green-600 font-semibold mt-1"><span id="stat-ai-recs-new">—</span></p>
+          </div>
+        </div>
+        <div class="grid grid-cols-1 xl:grid-cols-3 gap-6">
+          <div class="xl:col-span-2 space-y-5">
+            <div class="flex items-center justify-between">
+              <h3 class="font-bold flex items-center gap-2"><span class="material-symbols-outlined text-primary text-[18px]">auto_awesome_motion</span>Suggested Features</h3>
+              <button class="text-xs font-bold text-primary hover:underline">View Roadmap →</button>
+            </div>
+            <div id="suggested-features-grid" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <!-- Populated by JS -->
+              <div class="skeleton h-40 rounded-xl"></div>
+              <div class="skeleton h-40 rounded-xl"></div>
+            </div>
+            <div id="feedback-synthesis-box" class="bg-primary/5 border border-primary/15 rounded-xl p-5">
+              <h3 class="text-xs font-black mb-4 uppercase tracking-wider flex items-center gap-2"><span class="material-symbols-outlined text-primary text-[16px]">forum</span>AI Feedback Synthesis</h3>
+              <ul id="feedback-list" class="space-y-3">
+                <li class="skeleton h-5 rounded w-3/4"></li>
+                <li class="skeleton h-5 rounded w-2/3"></li>
+                <li class="skeleton h-5 rounded w-5/6"></li>
+              </ul>
+            </div>
+          </div>
+          <div class="space-y-6">
+            <div>
+              <h3 class="text-xs font-black text-slate-400 uppercase tracking-widest mb-5 flex items-center gap-2"><span class="material-symbols-outlined text-[16px]">history</span>Activity</h3>
+              <div id="activity-timeline" class="space-y-5 relative before:content-[''] before:absolute before:left-[10px] before:top-2 before:bottom-2 before:w-px before:bg-border-light">
+                <div class="skeleton h-14 rounded-xl ml-7"></div>
+                <div class="skeleton h-14 rounded-xl ml-7"></div>
+              </div>
+            </div>
+            <div class="bg-white border border-border-light rounded-xl p-4">
+              <h4 class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Live Sources</h4>
+              <div id="live-sources-list" class="space-y-2.5">
+                <div class="skeleton h-5 rounded w-full"></div>
+                <div class="skeleton h-5 rounded w-full"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ══════════════════════ HOOKS ══════════════════════ -->
+      <div id="page-hooks" class="page p-7 space-y-7">
+        <div>
+          <h2 class="text-2xl font-black">Hooks</h2>
+          <p class="text-slate-400 text-sm mt-1">Connect external platforms to automatically pull in user reviews, feedback, and signals.</p>
+        </div>
+        <!-- Summary stats -->
+        <div class="grid grid-cols-3 gap-4">
+          <div class="bg-white border border-border-light rounded-xl p-5 text-center shadow-sm"><p class="text-2xl font-black" id="hooks-connected-count">—</p><p class="text-xs text-slate-400 font-semibold mt-1">Connected</p></div>
+          <div class="bg-white border border-border-light rounded-xl p-5 text-center shadow-sm"><p class="text-2xl font-black" id="hooks-reviews-count">—</p><p class="text-xs text-slate-400 font-semibold mt-1">Reviews Synced</p></div>
+          <div class="bg-white border border-border-light rounded-xl p-5 text-center shadow-sm"><p class="text-2xl font-black text-amber-500" id="hooks-attention-count">—</p><p class="text-xs text-amber-500 font-semibold mt-1">Needs Attention</p></div>
+        </div>
+
+        <!-- App Stores section -->
+        <div>
+          <h3 class="text-xs font-black text-slate-400 uppercase tracking-widest mb-4">Connections</h3>
+          <div id="hooks-appstores-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            <div class="skeleton h-52 rounded-xl"></div>
+            <div class="skeleton h-52 rounded-xl"></div>
+          </div>
+        </div>
+
+        <!-- Support & CRM section -->
+        <div>
+          <h3 class="text-xs font-black text-slate-400 uppercase tracking-widest mb-4">Support & CRM</h3>
+          <div id="hooks-crm-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            <div class="skeleton h-52 rounded-xl"></div>
+            <div class="skeleton h-52 rounded-xl"></div>
+          </div>
+        </div>
+
+        <!-- Global Sync Settings -->
+        <div class="bg-white border border-border-light rounded-xl p-6">
+          <h3 class="font-bold mb-5 flex items-center gap-2 text-sm"><span class="material-symbols-outlined text-primary text-[18px]">tune</span>Global Sync Settings</h3>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
+            <div><label class="text-xs font-bold text-slate-700 block mb-1.5">Sync Frequency</label>
+              <select id="sync-frequency" class="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-primary/20">
+                <option>Every 30 min</option><option>Every hour</option><option>Every 6 hours</option><option>Daily</option>
+              </select>
+            </div>
+            <div><label class="text-xs font-bold text-slate-700 block mb-1.5">Minimum Star Rating</label>
+              <select id="sync-min-rating" class="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-primary/20">
+                <option>All (1–5★)</option><option>2★ and above</option><option>3★ and above</option>
+              </select>
+            </div>
+            <div class="md:col-span-2 flex items-center justify-between p-4 bg-slate-50 rounded-lg">
+              <div><p class="text-sm font-semibold">Auto-tag reviews with AI</p><p class="text-xs text-slate-400 mt-0.5">Classify incoming reviews into feature requests, bugs, and compliments.</p></div>
+              <label class="relative inline-flex items-center cursor-pointer">
+                <input id="sync-auto-tag" type="checkbox" class="sr-only peer"/>
+                <div class="w-10 h-5 bg-slate-200 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-primary"></div>
+              </label>
+            </div>
+          </div>
+          <button onclick="saveSyncSettings()" class="mt-4 px-5 py-2 bg-primary text-white text-sm font-bold rounded-lg hover:bg-primary/90 transition-all shadow-sm">Save Sync Settings</button>
+        </div>
+      </div>
+
+      <!-- ══════════════════════ CONFIG ══════════════════════ -->
+      <div id="page-config" class="page pb-20">
+        <div class="p-7 space-y-8 max-w-3xl">
+          <div><h2 class="text-2xl font-black">Config</h2><p class="text-slate-400 text-sm mt-1">Configure your AI model, usage limits, and processing preferences.</p></div>
+
+          <section>
+            <h3 class="text-xs font-black text-slate-400 uppercase tracking-widest mb-4 flex items-center gap-2"><span class="material-symbols-outlined text-[16px]">memory</span>AI Model</h3>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div class="model-card relative cursor-pointer rounded-xl border-2 border-primary bg-white p-5 shadow-sm" data-model="gpt4o">
+                <div class="model-check absolute top-3 right-3 h-5 w-5 rounded-full bg-primary flex items-center justify-center"><span class="material-symbols-outlined text-white text-xs">check</span></div>
+                <div class="flex items-center gap-3 mb-3"><div class="w-9 h-9 rounded-lg bg-slate-100 flex items-center justify-center"><span class="material-symbols-outlined text-slate-600">bolt</span></div><div><h4 class="font-bold text-sm">GPT-4o</h4><p class="text-[11px] text-slate-400">OpenAI · Most Capable</p></div></div>
+                <p class="text-xs text-slate-500 leading-relaxed mb-3">Best for complex reasoning, creative writing and nuanced feedback analysis.</p>
+                <div class="flex gap-2"><span class="px-2 py-0.5 badge-green text-[9px] font-black rounded uppercase">Active</span><span class="px-2 py-0.5 badge-slate text-[9px] font-black rounded uppercase">128k ctx</span></div>
+              </div>
+              <div class="model-card relative cursor-pointer rounded-xl border-2 border-slate-200 bg-white p-5 hover:border-primary/40 transition-all" data-model="claude">
+                <div class="flex items-center gap-3 mb-3"><div class="w-9 h-9 rounded-lg bg-slate-100 flex items-center justify-center"><span class="material-symbols-outlined text-slate-600">forum</span></div><div><h4 class="font-bold text-sm">Claude 3.5 Sonnet</h4><p class="text-[11px] text-slate-400">Anthropic · Balanced</p></div></div>
+                <p class="text-xs text-slate-500 leading-relaxed mb-3">Exceptional for long documents, technical analysis, and structured extraction.</p>
+                <div class="flex gap-2"><span class="px-2 py-0.5 badge-slate text-[9px] font-black rounded uppercase">200k ctx</span><span class="px-2 py-0.5 badge-blue text-[9px] font-black rounded uppercase">Fast</span></div>
+              </div>
+              <div class="model-card relative cursor-pointer rounded-xl border-2 border-slate-200 bg-white p-5 hover:border-primary/40 transition-all" data-model="gemini">
+                <div class="flex items-center gap-3 mb-3"><div class="w-9 h-9 rounded-lg bg-slate-100 flex items-center justify-center"><span class="material-symbols-outlined text-slate-600">auto_awesome</span></div><div><h4 class="font-bold text-sm">Gemini 1.5 Pro</h4><p class="text-[11px] text-slate-400">Google · Multimodal</p></div></div>
+                <p class="text-xs text-slate-500 leading-relaxed mb-3">Large-context tasks, mixed media, and multilingual review support.</p>
+                <div class="flex gap-2"><span class="px-2 py-0.5 badge-slate text-[9px] font-black rounded uppercase">1M ctx</span><span class="px-2 py-0.5 badge-amber text-[9px] font-black rounded uppercase">Beta</span></div>
+              </div>
+              <div class="model-card relative cursor-pointer rounded-xl border-2 border-slate-200 bg-white p-5 hover:border-primary/40 transition-all" data-model="llama">
+                <div class="flex items-center gap-3 mb-3"><div class="w-9 h-9 rounded-lg bg-slate-100 flex items-center justify-center"><span class="material-symbols-outlined text-slate-600">hub</span></div><div><h4 class="font-bold text-sm">Llama 3.1 70B</h4><p class="text-[11px] text-slate-400">Meta · Open Source</p></div></div>
+                <p class="text-xs text-slate-500 leading-relaxed mb-3">Self-hosted option — full data control, nothing leaves your infrastructure.</p>
+                <div class="flex gap-2"><span class="px-2 py-0.5 badge-slate text-[9px] font-black rounded uppercase">Self-host</span><span class="px-2 py-0.5 badge-green text-[9px] font-black rounded uppercase">Free</span></div>
+              </div>
+            </div>
+          </section>
+
+          <section class="bg-white border border-border-light rounded-xl p-6 space-y-5">
+            <h3 class="text-xs font-black text-slate-400 uppercase tracking-widest flex items-center gap-2"><span class="material-symbols-outlined text-[16px]">tune</span>Model Parameters</h3>
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div><label class="text-sm font-semibold block">Temperature</label><p class="text-xs text-slate-400">Lower = focused. Higher = creative.</p></div>
+              <div class="flex items-center gap-3 min-w-[200px]"><input id="tempRange" type="range" min="0" max="1" step="0.1" value="0.7" class="w-full h-1.5 bg-slate-200 rounded-lg accent-primary cursor-pointer"/><span id="tempVal" class="text-sm font-black text-primary w-8 text-right">0.7</span></div>
+            </div>
+            <div class="h-px bg-slate-100"></div>
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div><label class="text-sm font-semibold block">Max Tokens / Response</label><p class="text-xs text-slate-400">Maximum tokens generated per AI call.</p></div>
+              <input id="cfg-max-tokens" type="number" value="4096" class="w-32 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm text-right font-mono outline-none focus:ring-2 focus:ring-primary/20"/>
+            </div>
+            <div class="h-px bg-slate-100"></div>
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div><label class="text-sm font-semibold block">Response Language</label><p class="text-xs text-slate-400">Language for AI-generated summaries.</p></div>
+              <select id="cfg-language" class="w-40 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-primary/20">
+                <option>English</option><option>Spanish</option><option>French</option><option>German</option><option>Japanese</option>
+              </select>
+            </div>
+          </section>
+
+          <section class="bg-white border border-border-light rounded-xl p-6 space-y-5">
+            <h3 class="text-xs font-black text-slate-400 uppercase tracking-widest flex items-center gap-2"><span class="material-symbols-outlined text-[16px]">bar_chart</span>Usage Limits</h3>
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div><label class="text-sm font-semibold block">Monthly Request Cap</label><p class="text-xs text-slate-400">Max AI requests per calendar month. 0 = unlimited.</p></div>
+              <div class="flex items-center gap-2"><input id="cfg-monthly-cap" type="number" value="10000" class="w-28 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm text-right font-mono outline-none focus:ring-2 focus:ring-primary/20"/><span class="text-xs text-slate-400 font-semibold">/ month</span></div>
+            </div>
+            <div>
+              <div class="flex justify-between text-xs mb-2"><span class="text-slate-500 font-semibold">This month's usage</span><span id="cfg-usage-label" class="font-black">— / —</span></div>
+              <div class="h-2 bg-slate-100 rounded-full overflow-hidden"><div id="cfg-usage-bar" class="h-full bg-primary rounded-full transition-all" style="width:0%"></div></div>
+              <p id="cfg-usage-warn" class="text-[11px] text-amber-500 font-semibold mt-1.5 hidden">⚠ 92%+ used — consider upgrading your plan</p>
+            </div>
+            <div class="h-px bg-slate-100"></div>
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div><label class="text-sm font-semibold block">Rate Limit</label><p class="text-xs text-slate-400">Max concurrent AI requests per minute.</p></div>
+              <div class="flex items-center gap-2"><input id="cfg-rate-limit" type="number" value="60" class="w-20 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm text-right font-mono outline-none focus:ring-2 focus:ring-primary/20"/><span class="text-xs text-slate-400 font-semibold">req/min</span></div>
+            </div>
+            <div class="h-px bg-slate-100"></div>
+            <div class="flex items-center justify-between">
+              <div><p class="text-sm font-semibold">Alert at 80% of limit</p><p class="text-xs text-slate-400">Email notification before hitting cap.</p></div>
+              <label class="relative inline-flex items-center cursor-pointer"><input id="cfg-alert-80" type="checkbox" class="sr-only peer"/><div class="w-10 h-5 bg-slate-200 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-primary"></div></label>
+            </div>
+          </section>
+
+          <section class="bg-white border border-border-light rounded-xl p-6 space-y-5">
+            <h3 class="text-xs font-black text-slate-400 uppercase tracking-widest flex items-center gap-2"><span class="material-symbols-outlined text-[16px]">shield_lock</span>Data & Privacy</h3>
+            <div class="flex items-center justify-between">
+              <div><p class="text-sm font-semibold">Conversation Logging</p><p class="text-xs text-slate-400">Log all AI interactions for debugging.</p></div>
+              <label class="relative inline-flex items-center cursor-pointer"><input id="cfg-logging" type="checkbox" class="sr-only peer"/><div class="w-10 h-5 bg-slate-200 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-primary"></div></label>
+            </div>
+            <div class="h-px bg-slate-100"></div>
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div><p class="text-sm font-semibold">Log Retention Period</p><p class="text-xs text-slate-400">Auto-delete logs after selected period.</p></div>
+              <select id="cfg-log-retention" class="w-44 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-primary/20">
+                <option>30 Days</option><option>90 Days</option><option>1 Year</option><option>Forever</option>
+              </select>
+            </div>
+          </section>
+        </div>
+        <div class="sticky bottom-0 bg-white border-t border-border-light px-7 py-4 flex items-center justify-between">
+          <p class="text-xs text-slate-400 flex items-center gap-1.5" id="cfg-last-saved"><span class="material-symbols-outlined text-[16px]">history</span>Not yet saved</p>
+          <div class="flex gap-3">
+            <button onclick="loadConfig()" class="px-4 py-2 text-sm font-bold text-slate-500 hover:text-slate-800 transition-colors">Cancel</button>
+            <button onclick="saveConfig()" id="cfg-save-btn" class="px-6 py-2 bg-primary text-white text-sm font-bold rounded-lg hover:bg-primary/90 transition-all active:scale-95 shadow-sm">Save Changes</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ══════════════════════ KEYS ══════════════════════ -->
+      <div id="page-keys" class="page p-7 space-y-7">
+        <div class="flex items-start justify-between">
+          <div><h2 class="text-2xl font-black">API Keys</h2><p class="text-slate-400 text-sm mt-1">Manage keys for accessing the ProdMind API from your apps.</p></div>
+          <button onclick="showNewKeyModal()" class="flex items-center gap-2 px-4 py-2 bg-primary text-white text-sm font-bold rounded-lg hover:bg-primary/90 transition-all shadow-sm"><span class="material-symbols-outlined text-[18px]">add</span>New Key</button>
+        </div>
+        <div class="flex items-start gap-3 p-4 bg-amber-50 border border-amber-200 rounded-xl">
+          <span class="material-symbols-outlined text-amber-500 text-[18px] mt-0.5">info</span>
+          <p class="text-xs text-amber-800 leading-relaxed">Never share keys publicly or commit them to source control. Rotate compromised keys immediately. Full key is shown <strong>only once</strong> at creation.</p>
+        </div>
+        <div class="bg-white border border-border-light rounded-xl overflow-hidden">
+          <div class="grid grid-cols-[2fr_1fr_1fr_1fr_80px] text-[10px] font-black text-slate-400 uppercase tracking-widest bg-slate-50 border-b border-border-light px-5 py-3">
+            <span>Name / Key</span><span>Created</span><span>Last Used</span><span>Status</span><span></span>
+          </div>
+          <div id="keys-table-body">
+            <div class="px-5 py-4"><div class="skeleton h-10 rounded w-full"></div></div>
+            <div class="px-5 py-4 border-t border-border-light"><div class="skeleton h-10 rounded w-full"></div></div>
+          </div>
+        </div>
+        <!-- Webhook Secret -->
+        <div>
+          <h3 class="text-xs font-black text-slate-400 uppercase tracking-widest mb-4 flex items-center gap-2"><span class="material-symbols-outlined text-[16px]">webhook</span>Webhook Secret</h3>
+          <div class="bg-white border border-border-light rounded-xl p-5">
+            <p class="text-xs text-slate-500 mb-4">Use this to verify incoming webhook payloads are from ProdMind.</p>
+            <div class="flex items-center gap-3">
+              <code class="flex-1 text-xs font-mono text-slate-700 bg-slate-50 border border-slate-200 px-3 py-2.5 rounded-lg" id="webhookSecret">whsec_••••••••••••••••••••••••••••••••</code>
+              <button onclick="revealWebhook()" class="px-3 py-2 bg-slate-100 border border-slate-200 text-slate-600 text-xs font-bold rounded-lg hover:bg-slate-200 transition-colors">Reveal</button>
+              <button onclick="rotateWebhook()" class="px-3 py-2 bg-slate-100 border border-slate-200 text-slate-600 text-xs font-bold rounded-lg hover:bg-slate-200 transition-colors">Rotate</button>
+            </div>
+          </div>
+        </div>
+        <!-- New Key Modal -->
+        <div id="newKeyModal" class="hidden fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center">
+          <div class="bg-white rounded-2xl shadow-2xl p-7 w-full max-w-md">
+            <div class="flex items-center justify-between mb-5"><h3 class="text-lg font-black">Create New Key</h3><button onclick="hideNewKeyModal()" class="p-1 text-slate-400 hover:text-slate-700"><span class="material-symbols-outlined">close</span></button></div>
+            <div class="space-y-4">
+              <div><label class="text-xs font-bold text-slate-700 block mb-1.5">Key Name</label><input id="new-key-name" type="text" placeholder="e.g. Mobile App Production" class="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-primary/20"/></div>
+              <div><label class="text-xs font-bold text-slate-700 block mb-1.5">Environment</label>
+                <select id="new-key-env" class="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-primary/20">
+                  <option>Production</option><option>Development</option><option>Staging</option>
+                </select>
+              </div>
+              <div><label class="text-xs font-bold text-slate-700 block mb-1.5">Expiry</label>
+                <select id="new-key-expiry" class="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-primary/20">
+                  <option>Never</option><option>30 days</option><option>90 days</option><option>1 year</option>
+                </select>
+              </div>
+              <div class="flex gap-3 pt-2">
+                <button onclick="hideNewKeyModal()" class="flex-1 py-2.5 bg-slate-100 text-slate-700 text-sm font-bold rounded-lg hover:bg-slate-200 transition-colors">Cancel</button>
+                <button onclick="createApiKey()" id="create-key-btn" class="flex-1 py-2.5 bg-primary text-white text-sm font-bold rounded-lg hover:bg-primary/90 transition-colors">Generate Key</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <!-- Reveal key once modal -->
+        <div id="revealKeyModal" class="hidden fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center">
+          <div class="bg-white rounded-2xl shadow-2xl p-7 w-full max-w-md">
+            <div class="flex items-center justify-between mb-3"><h3 class="text-lg font-black text-green-600 flex items-center gap-2"><span class="material-symbols-outlined">check_circle</span>Key Created!</h3><button onclick="closeRevealModal()" class="p-1 text-slate-400 hover:text-slate-700"><span class="material-symbols-outlined">close</span></button></div>
+            <p class="text-xs text-red-600 font-semibold mb-4 flex items-center gap-1.5"><span class="material-symbols-outlined text-[16px]">warning</span>Copy this key now — it will <strong>never be shown again</strong>.</p>
+            <div class="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-xl p-4 mb-4">
+              <code id="reveal-key-value" class="flex-1 text-sm font-mono text-slate-800 break-all"></code>
+              <button onclick="copyRevealedKey()" class="px-3 py-2 bg-primary text-white text-xs font-bold rounded-lg hover:bg-primary/90 transition-colors flex-shrink-0">Copy</button>
+            </div>
+            <button onclick="closeRevealModal()" class="w-full py-2.5 bg-slate-100 text-slate-700 text-sm font-bold rounded-lg hover:bg-slate-200 transition-colors">I've saved it — Close</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ══════════════════════ SETTINGS ══════════════════════ -->
+      <div id="page-settings" class="page p-7 space-y-7 max-w-3xl">
+        <div><h2 class="text-2xl font-black">Settings</h2><p class="text-slate-400 text-sm mt-1">Manage your workspace, profile, and notification preferences.</p></div>
+
+        <!-- Workspace -->
+        <section class="bg-white border border-border-light rounded-xl p-6 space-y-5">
+          <h3 class="text-xs font-black text-slate-400 uppercase tracking-widest flex items-center gap-2"><span class="material-symbols-outlined text-[16px]">apartment</span>Workspace</h3>
+          <div class="flex items-start gap-4">
+            <div id="ws-logo" class="h-16 w-16 rounded-xl bg-primary flex items-center justify-center text-white text-2xl font-black flex-shrink-0">A</div>
+            <div class="flex-1"><label class="text-xs font-bold text-slate-700 block mb-1.5">Workspace Name</label><input id="ws-name" type="text" value="" class="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-primary/20"/></div>
+          </div>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div><label class="text-xs font-bold text-slate-700 block mb-1.5">Website</label><input id="ws-website" type="text" value="" class="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-primary/20"/></div>
+            <div><label class="text-xs font-bold text-slate-700 block mb-1.5">Industry</label>
+              <select id="ws-industry" class="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-primary/20">
+                <option>SaaS / Software</option><option>E-Commerce</option><option>Fintech</option><option>Healthcare</option><option>Gaming</option>
+              </select>
+            </div>
+          </div>
+          <div><label class="text-xs font-bold text-slate-700 block mb-1.5">GitHub Repo <span class="text-slate-400 font-normal">(helps AI tailor insights)</span></label>
+            <input id="ws-github" type="text" placeholder="https://github.com/your-org/repo" class="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-primary/20"/>
+          </div>
+        </section>
+
+        <!-- Profile -->
+        <section class="bg-white border border-border-light rounded-xl p-6 space-y-5">
+          <h3 class="text-xs font-black text-slate-400 uppercase tracking-widest flex items-center gap-2"><span class="material-symbols-outlined text-[16px]">person</span>Your Profile</h3>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div><label class="text-xs font-bold text-slate-700 block mb-1.5">Full Name</label><input id="profile-name" type="text" value="" class="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-primary/20"/></div>
+            <div><label class="text-xs font-bold text-slate-700 block mb-1.5">Email <span class="text-slate-400 font-normal">(managed by auth)</span></label><input id="profile-email" type="email" value="" readonly class="w-full px-3 py-2 bg-slate-100 border border-slate-200 rounded-lg text-sm text-slate-500 cursor-not-allowed"/></div>
+            <div><label class="text-xs font-bold text-slate-700 block mb-1.5">Role / Title</label><input id="profile-role" type="text" value="" class="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-primary/20"/></div>
+            <div><label class="text-xs font-bold text-slate-700 block mb-1.5">Timezone</label>
+              <select id="profile-timezone" class="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-primary/20">
+                <option>UTC-8 (PST)</option><option>UTC-5 (EST)</option><option>UTC+0 (GMT)</option><option>UTC+1 (CET)</option><option>UTC+5:30 (IST)</option><option>UTC+8 (SGT)</option><option>UTC+9 (JST)</option>
+              </select>
+            </div>
+          </div>
+        </section>
+
+        <!-- Notifications -->
+        <section class="bg-white border border-border-light rounded-xl p-6 space-y-0 divide-y divide-slate-100">
+          <h3 class="text-xs font-black text-slate-400 uppercase tracking-widest pb-4 flex items-center gap-2"><span class="material-symbols-outlined text-[16px]">notifications</span>Notifications</h3>
+          <div class="flex items-center justify-between py-4"><div><p class="text-sm font-semibold">Weekly Insight Digest</p><p class="text-xs text-slate-400">Email summary every Monday.</p></div><label class="relative inline-flex items-center cursor-pointer"><input id="notif-weekly" type="checkbox" class="sr-only peer"/><div class="w-10 h-5 bg-slate-200 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-primary"></div></label></div>
+          <div class="flex items-center justify-between py-4"><div><p class="text-sm font-semibold">New Feature Suggestion</p><p class="text-xs text-slate-400">Notify when AI generates a recommendation.</p></div><label class="relative inline-flex items-center cursor-pointer"><input id="notif-features" type="checkbox" class="sr-only peer"/><div class="w-10 h-5 bg-slate-200 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-primary"></div></label></div>
+          <div class="flex items-center justify-between py-4"><div><p class="text-sm font-semibold">Sync Failures</p><p class="text-xs text-slate-400">Alert when a hook fails or disconnects.</p></div><label class="relative inline-flex items-center cursor-pointer"><input id="notif-sync" type="checkbox" class="sr-only peer"/><div class="w-10 h-5 bg-slate-200 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-primary"></div></label></div>
+          <div class="flex items-center justify-between py-4"><div><p class="text-sm font-semibold">Usage Limit Alerts</p><p class="text-xs text-slate-400">Warn when 80% of monthly cap is reached.</p></div><label class="relative inline-flex items-center cursor-pointer"><input id="notif-usage" type="checkbox" class="sr-only peer"/><div class="w-10 h-5 bg-slate-200 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-primary"></div></label></div>
+        </section>
+
+        <!-- Danger Zone -->
+        <section class="bg-red-50 border border-red-200 rounded-xl p-6 space-y-4">
+          <h3 class="text-xs font-black text-red-400 uppercase tracking-widest flex items-center gap-2"><span class="material-symbols-outlined text-[16px]">warning</span>Danger Zone</h3>
+          <div class="flex items-center justify-between"><div><p class="text-sm font-semibold">Delete All Data</p><p class="text-xs text-slate-500">Permanently remove all synced reviews. Irreversible.</p></div><button onclick="confirmDeleteData()" class="px-4 py-2 bg-white border border-red-300 text-red-600 text-xs font-bold rounded-lg hover:bg-red-100 transition-colors">Delete Data</button></div>
+          <div class="h-px bg-red-200"></div>
+          <div class="flex items-center justify-between"><div><p class="text-sm font-semibold">Delete Workspace</p><p class="text-xs text-slate-500">Close account. All data and keys removed permanently.</p></div><button onclick="confirmDeleteWorkspace()" class="px-4 py-2 bg-red-600 text-white text-xs font-bold rounded-lg hover:bg-red-700 transition-colors">Delete Workspace</button></div>
+        </section>
+
+        <div class="flex gap-3 pb-6">
+          <button onclick="saveSettings()" id="settings-save-btn" class="px-6 py-2.5 bg-primary text-white text-sm font-bold rounded-lg hover:bg-primary/90 transition-all shadow-sm">Save Settings</button>
+          <button onclick="loadSettings()" class="px-4 py-2.5 text-sm font-bold text-slate-500 hover:text-slate-800 transition-colors">Cancel</button>
+        </div>
+      </div>
+
+      <!-- ══════════════════════ BILLING ══════════════════════ -->
+      <div id="page-billing" class="page p-7 space-y-7">
+        <div><h2 class="text-2xl font-black">Billing</h2><p class="text-slate-400 text-sm mt-1">Manage your plan, payment method, and invoices.</p></div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-5">
+          <!-- Current plan card -->
+          <div class="lg:col-span-2 bg-gradient-to-br from-primary to-primary/80 rounded-2xl p-6 text-white relative overflow-hidden">
+            <div class="absolute top-0 right-0 w-48 h-48 bg-white/5 rounded-full -translate-y-12 translate-x-12"></div>
+            <div class="relative">
+              <div class="flex items-center gap-2 mb-1"><span class="material-symbols-outlined text-[18px]">workspace_premium</span><span class="text-xs font-black uppercase tracking-widest opacity-80">Current Plan</span></div>
+              <h3 id="billing-plan-name" class="text-3xl font-black mb-1">—</h3>
+              <p id="billing-plan-desc" class="text-white/70 text-sm mb-5">—</p>
+              <div class="flex items-end gap-1 mb-4"><span id="billing-price" class="text-4xl font-black">—</span><span class="text-white/70 mb-1.5 text-sm">/ month</span></div>
+              <div class="mb-2 flex justify-between text-xs text-white/70"><span>Monthly usage</span><span id="billing-usage-label">— / — requests</span></div>
+              <div class="h-2 bg-white/20 rounded-full overflow-hidden"><div id="billing-usage-bar" class="h-full bg-white rounded-full transition-all" style="width:0%"></div></div>
+              <p id="billing-renews" class="text-white/60 text-[11px] mt-1.5">—</p>
+            </div>
+          </div>
+          <!-- Upgrade card -->
+          <div class="bg-white border-2 border-dashed border-primary/30 rounded-2xl p-6 flex flex-col justify-between">
+            <div>
+              <span class="px-2 py-0.5 bg-primary/10 text-primary text-[10px] font-black rounded uppercase">Recommended</span>
+              <h3 class="text-xl font-black mt-3">Enterprise</h3>
+              <p class="text-slate-400 text-xs mt-1 mb-4">Unlimited everything + dedicated support + custom models</p>
+              <ul class="space-y-2">
+                <li class="flex items-center gap-2 text-xs text-slate-600"><span class="material-symbols-outlined text-primary text-[14px]">check</span>Unlimited AI requests</li>
+                <li class="flex items-center gap-2 text-xs text-slate-600"><span class="material-symbols-outlined text-primary text-[14px]">check</span>Custom fine-tuning</li>
+                <li class="flex items-center gap-2 text-xs text-slate-600"><span class="material-symbols-outlined text-primary text-[14px]">check</span>SLA guarantee</li>
+                <li class="flex items-center gap-2 text-xs text-slate-600"><span class="material-symbols-outlined text-primary text-[14px]">check</span>SSO / SAML</li>
+              </ul>
+            </div>
+            <button class="mt-5 w-full py-2.5 bg-primary text-white text-sm font-black rounded-xl hover:bg-primary/90 transition-all shadow-sm">Upgrade Plan</button>
+          </div>
+        </div>
+
+        <!-- Plan comparison -->
+        <div class="bg-white border border-border-light rounded-xl overflow-hidden">
+          <div class="grid grid-cols-4 text-[10px] font-black text-slate-400 uppercase tracking-widest bg-slate-50 border-b border-border-light">
+            <div class="px-5 py-3 col-span-2">Feature</div><div class="px-4 py-3 text-center">Pro <span class="badge-green text-[9px] px-1 rounded font-black ml-1">Current</span></div><div class="px-4 py-3 text-center text-primary">Enterprise</div>
+          </div>
+          <div class="divide-y divide-slate-100 text-sm">
+            <div class="grid grid-cols-4 items-center"><div class="px-5 py-3 col-span-2 text-slate-700 font-medium">Monthly Requests</div><div class="px-4 py-3 text-center text-slate-500">10,000</div><div class="px-4 py-3 text-center font-bold text-primary">Unlimited</div></div>
+            <div class="grid grid-cols-4 items-center"><div class="px-5 py-3 col-span-2 text-slate-700 font-medium">Team Seats</div><div class="px-4 py-3 text-center text-slate-500">5</div><div class="px-4 py-3 text-center font-bold text-primary">Unlimited</div></div>
+            <div class="grid grid-cols-4 items-center"><div class="px-5 py-3 col-span-2 text-slate-700 font-medium">Data Hooks</div><div class="px-4 py-3 text-center text-slate-500">10</div><div class="px-4 py-3 text-center font-bold text-primary">Unlimited</div></div>
+            <div class="grid grid-cols-4 items-center"><div class="px-5 py-3 col-span-2 text-slate-700 font-medium">Custom Models</div><div class="px-4 py-3 text-center"><span class="material-symbols-outlined text-slate-300 text-[18px]">close</span></div><div class="px-4 py-3 text-center"><span class="material-symbols-outlined text-primary text-[18px]">check_circle</span></div></div>
+            <div class="grid grid-cols-4 items-center"><div class="px-5 py-3 col-span-2 text-slate-700 font-medium">SSO / SAML</div><div class="px-4 py-3 text-center"><span class="material-symbols-outlined text-slate-300 text-[18px]">close</span></div><div class="px-4 py-3 text-center"><span class="material-symbols-outlined text-primary text-[18px]">check_circle</span></div></div>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+          <!-- Payment method -->
+          <div class="bg-white border border-border-light rounded-xl p-6">
+            <h3 class="text-xs font-black text-slate-400 uppercase tracking-widest mb-5 flex items-center gap-2"><span class="material-symbols-outlined text-[16px]">credit_card</span>Payment Method</h3>
+            <div id="billing-payment-card" class="flex items-center gap-4 p-4 border border-slate-200 rounded-xl bg-slate-50 mb-4">
+              <div id="billing-card-brand" class="h-10 w-16 bg-blue-600 rounded-lg flex items-center justify-center text-white text-xs font-black">VISA</div>
+              <div><p id="billing-card-last4" class="text-sm font-bold">•••• •••• •••• ——</p><p id="billing-card-expiry" class="text-xs text-slate-400">Expires ——</p></div>
+              <span class="ml-auto badge-green text-[9px] font-black px-2 py-0.5 rounded-full uppercase">Default</span>
+            </div>
+            <button class="w-full py-2.5 bg-slate-50 border border-slate-200 text-slate-700 text-xs font-bold rounded-lg hover:bg-slate-100 transition-colors flex items-center justify-center gap-2"><span class="material-symbols-outlined text-[16px]">add</span>Add Payment Method</button>
+          </div>
+          <!-- Invoices -->
+          <div class="bg-white border border-border-light rounded-xl p-6">
+            <h3 class="text-xs font-black text-slate-400 uppercase tracking-widest mb-5 flex items-center gap-2"><span class="material-symbols-outlined text-[16px]">receipt_long</span>Recent Invoices</h3>
+            <div id="invoices-list" class="space-y-0 divide-y divide-slate-100">
+              <div class="skeleton h-12 rounded my-1"></div>
+              <div class="skeleton h-12 rounded my-1"></div>
+            </div>
+            <button class="mt-3 text-xs font-bold text-primary hover:underline">View all invoices →</button>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- end pages -->
+  </main>
+</div>
+
+<!-- Toast container -->
+<div id="toast"></div>
+
+<script>
+// ════════════════════════════════════════════════════════════
+//  SUPABASE CONFIG
+// ════════════════════════════════════════════════════════════
+const SUPABASE_URL  = 'https://nbpmkvpeqtvtczlqgwax.supabase.co';
+const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5icG1rdnBlcXR2dGN6bHFnd2F4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzIxMTYzNjQsImV4cCI6MjA4NzY5MjM2NH0.isx0SkgR5eRqhaYedTpInqu7cO6cti5fNALagOU2Xj0';
+
+const { createClient } = supabase;
+const sb = createClient(SUPABASE_URL, SUPABASE_ANON);
+
+// ── App state ────────────────────────────────────────────────
+let currentUser = null;
+let currentWorkspace = null;
+let webhookSecretValue = null; // cached after first reveal
+
+// ════════════════════════════════════════════════════════════
+//  INIT
+// ════════════════════════════════════════════════════════════
+(async () => {
+  const { data: { session } } = await sb.auth.getSession();
+  if (!session) { window.location.href = 'auth/auth-v2.html'; return; }
+  currentUser = session.user;
+  populateUserUI(session.user);
+  await ensureWorkspace();
+  await loadPage('dashboard');
+})();
+
+sb.auth.onAuthStateChange((event, session) => {
+  if (event === 'SIGNED_OUT' || !session) window.location.href = 'auth/auth-v2.html';
+});
+
+// ── Ensure workspace exists (fallback if trigger didn't run) ─
+async function ensureWorkspace() {
+  const { data, error } = await sb.from('workspaces').select('*').eq('owner_id', currentUser.id).maybeSingle();
+  if (data) { currentWorkspace = data; return; }
+
+  // Manually create if trigger failed (dev environment edge case)
+  const meta = currentUser.user_metadata || {};
+  const { data: ws } = await sb.from('workspaces').insert({
+    owner_id: currentUser.id,
+    name: meta.company || 'My Workspace'
+  }).select().single();
+  currentWorkspace = ws;
+
+  // Seed defaults
+  if (ws) {
+    await Promise.all([
+      sb.from('notification_preferences').upsert({ user_id: currentUser.id }),
+      sb.from('ai_config').upsert({ workspace_id: ws.id }),
+      sb.from('sync_settings').upsert({ workspace_id: ws.id }),
+      sb.from('billing').upsert({ workspace_id: ws.id, plan: 'pro', price: 79, requests_limit: 10000, seats_limit: 5, renews_at: new Date(Date.now() + 30 * 86400000).toISOString().split('T')[0] }),
+      sb.from('dashboard_stats').upsert({ workspace_id: ws.id, signals_processed: 12420, signals_change_pct: 12, feature_ops: 42, feature_ops_change: 5, active_experiments: 8, ai_recs: 15, ai_recs_new_today: 8 }),
+      sb.from('webhook_secrets').upsert({ workspace_id: ws.id, secret: 'whsec_' + Array.from(crypto.getRandomValues(new Uint8Array(32))).map(b => b.toString(16).padStart(2,'0')).join('') }),
+    ]);
+  }
+}
+
+// ── Populate sidebar user info ───────────────────────────────
+function populateUserUI(user) {
+  const meta      = user.user_metadata || {};
+  const fullName  = meta.full_name || meta.name || user.email?.split('@')[0] || 'User';
+  const firstName = meta.first_name || fullName.split(' ')[0];
+  const initials  = fullName.split(' ').map(n => n[0]).join('').slice(0, 2).toUpperCase();
+  const avatarUrl = meta.avatar_url || meta.picture || null;
+
+  document.getElementById('user-name').textContent  = fullName;
+  document.getElementById('user-email').textContent = user.email || '';
+
+  const avatarEl = document.getElementById('user-avatar');
+  if (avatarUrl) {
+    avatarEl.outerHTML = `<img id="user-avatar" src="${avatarUrl}" class="h-8 w-8 rounded-full object-cover flex-shrink-0" alt="${fullName}"/>`;
+  } else {
+    avatarEl.textContent = initials;
+  }
+
+  const hour = new Date().getHours();
+  const tod  = hour < 12 ? 'morning' : hour < 18 ? 'afternoon' : 'evening';
+  const greetEl = document.getElementById('dashboard-greeting');
+  if (greetEl) greetEl.textContent = `Good ${tod}, ${firstName} 👋`;
+}
+
+// ════════════════════════════════════════════════════════════
+//  NAVIGATION
+// ════════════════════════════════════════════════════════════
+const navMeta = {
+  dashboard: { title:'Dashboard',  badge:'Overview' },
+  hooks:     { title:'Hooks',       badge:'Integrations' },
+  config:    { title:'Config',      badge:'AI Settings' },
+  keys:      { title:'API Keys',    badge:'Developer' },
+  settings:  { title:'Settings',    badge:'General' },
+  billing:   { title:'Billing',     badge:'Plan & Usage' },
+};
+
+async function navigate(id) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.getElementById('page-' + id)?.classList.add('active');
+  document.querySelectorAll('.nav-link').forEach(l => { l.classList.remove('nav-active'); l.classList.add('text-slate-500'); });
+  document.querySelectorAll(`.nav-link[data-page="${id}"]`).forEach(l => { l.classList.add('nav-active'); l.classList.remove('text-slate-500'); });
+  document.getElementById('page-title').textContent = navMeta[id]?.title || id;
+  document.getElementById('page-badge').textContent = navMeta[id]?.badge || '';
+  await loadPage(id);
+}
+
+document.querySelectorAll('.nav-link').forEach(l => l.addEventListener('click', e => { e.preventDefault(); navigate(l.dataset.page); }));
+
+async function loadPage(id) {
+  if (!currentWorkspace) return;
+  const loaders = { dashboard: loadDashboard, hooks: loadHooks, config: loadConfig, keys: loadKeys, settings: loadSettings, billing: loadBilling };
+  if (loaders[id]) await loaders[id]();
+}
+
+// ════════════════════════════════════════════════════════════
+//  DASHBOARD PAGE
+// ════════════════════════════════════════════════════════════
+async function loadDashboard() {
+  const wsId = currentWorkspace.id;
+
+  // Stats
+  const { data: stats } = await sb.from('dashboard_stats').select('*').eq('workspace_id', wsId).maybeSingle();
+  if (stats) {
+    setText('stat-signals', stats.signals_processed?.toLocaleString());
+    setText('stat-signals-change', `+${stats.signals_change_pct}% this week`);
+    setText('stat-feature-ops', stats.feature_ops?.toLocaleString());
+    setText('stat-feature-ops-change', `+${stats.feature_ops_change}% this week`);
+    setText('stat-experiments', stats.active_experiments?.toLocaleString());
+    setText('stat-ai-recs', stats.ai_recs?.toLocaleString());
+    setText('stat-ai-recs-new', `+${stats.ai_recs_new_today} new today`);
+  }
+
+  // Suggested features
+  const { data: features } = await sb.from('suggested_features').select('*').eq('workspace_id', wsId).eq('is_dismissed', false).order('created_at', { ascending: false }).limit(6);
+  renderSuggestedFeatures(features || []);
+
+  // Feedback synthesis
+  const { data: feedback } = await sb.from('feedback_synthesis').select('*').eq('workspace_id', wsId).order('created_at', { ascending: false });
+  renderFeedbackSynthesis(feedback || []);
+
+  // Activity
+  const { data: activity } = await sb.from('activity_log').select('*').eq('workspace_id', wsId).order('created_at', { ascending: false }).limit(6);
+  renderActivityTimeline(activity || []);
+
+  // Live sources (hooks)
+  const { data: hooks } = await sb.from('hooks').select('name,type,status').eq('workspace_id', wsId);
+  renderLiveSources(hooks || []);
+}
+
+function renderSuggestedFeatures(features) {
+  const grid = document.getElementById('suggested-features-grid');
+  if (!features.length) { grid.innerHTML = '<p class="text-sm text-slate-400 col-span-2">No features yet — connect a data source to generate AI recommendations.</p>'; return; }
+  const impactMap = { high: 'badge-red', medium: 'badge-blue', low: 'badge-slate' };
+  const impactLabel = { high: 'High Impact', medium: 'Medium Impact', low: 'Low Impact' };
+  const confColor = c => c >= 85 ? 'text-primary' : c >= 70 ? 'text-amber-500' : 'text-slate-500';
+  grid.innerHTML = features.slice(0, 4).map(f => `
+    <div class="group bg-white border border-border-light rounded-xl p-5 hover:border-primary/40 hover:shadow-md transition-all cursor-pointer">
+      <div class="flex justify-between items-start mb-3">
+        <div class="h-10 w-10 bg-slate-100 rounded-lg flex items-center justify-center group-hover:bg-primary group-hover:text-white transition-colors"><span class="material-symbols-outlined">${esc(f.icon)}</span></div>
+        <div class="text-right"><div class="text-[9px] font-bold text-slate-400 uppercase">Confidence</div><div class="text-lg font-black ${confColor(f.confidence)}">${f.confidence}%</div></div>
+      </div>
+      <h4 class="font-bold">${esc(f.title)}</h4>
+      <p class="text-xs text-slate-500 mt-1 leading-relaxed">${esc(f.description)}</p>
+      <div class="mt-3 flex gap-2">
+        <span class="px-2 py-0.5 ${impactMap[f.impact_level] || 'badge-slate'} text-[9px] font-black rounded uppercase">${impactLabel[f.impact_level] || f.impact_level}</span>
+        <span class="px-2 py-0.5 badge-slate text-[9px] font-black rounded uppercase">${f.sources_count} Sources</span>
+      </div>
+    </div>`).join('');
+}
+
+function renderFeedbackSynthesis(items) {
+  const list = document.getElementById('feedback-list');
+  if (!items.length) { list.innerHTML = '<li class="text-sm text-slate-400">No feedback synthesis yet.</li>'; return; }
+  const labelColor = t => t === 'churn_alert' ? 'text-red-600' : t === 'expansion' ? 'text-blue-600' : 'text-slate-700';
+  list.innerHTML = items.map(f => `
+    <li class="flex gap-3">
+      <span class="size-1.5 rounded-full bg-primary mt-2 flex-shrink-0"></span>
+      <p class="text-sm ${labelColor(f.type)}"><span class="font-semibold">${esc(f.label)}:</span> ${esc(f.content)}</p>
+    </li>`).join('');
+}
+
+function renderActivityTimeline(items) {
+  const el = document.getElementById('activity-timeline');
+  if (!items.length) { el.innerHTML = '<p class="text-sm text-slate-400 ml-7">No activity yet.</p>'; return; }
+  const colorMap = { primary: 'border-primary text-primary', blue: 'border-blue-400 text-blue-400', amber: 'border-amber-400 text-amber-400', red: 'border-red-400 text-red-400' };
+  el.innerHTML = items.map(a => {
+    const colors = colorMap[a.icon_color] || colorMap.primary;
+    const when = timeAgo(a.created_at);
+    return `
+      <div class="relative pl-7">
+        <div class="absolute left-0 top-0.5 size-5 rounded-full bg-white border-2 ${colors} flex items-center justify-center z-10"><span class="material-symbols-outlined ${colors.split(' ')[1]} text-[11px]">${esc(a.icon)}</span></div>
+        <p class="text-[10px] font-bold text-slate-400 uppercase">${when}</p>
+        <p class="text-xs font-semibold mt-0.5">${esc(a.title)}</p>
+        ${a.description ? `<p class="text-[11px] text-slate-400">${esc(a.description)}</p>` : ''}
+      </div>`;
+  }).join('');
+}
+
+function renderLiveSources(hooks) {
+  const el = document.getElementById('live-sources-list');
+  if (!hooks.length) { el.innerHTML = '<p class="text-xs text-slate-400">No sources connected yet.</p>'; return; }
+  const statusBadge = s => s === 'live' ? '<span class="badge-green text-[9px] px-1.5 py-0.5 rounded font-bold">Active</span>' : s === 'syncing' ? '<span class="badge-amber text-[9px] px-1.5 py-0.5 rounded font-bold">Syncing</span>' : '<span class="badge-slate text-[9px] px-1.5 py-0.5 rounded font-bold">Idle</span>';
+  const dot = s => s === 'live' ? 'bg-green-500 animate-pulse' : s === 'syncing' ? 'bg-amber-400' : 'bg-slate-300';
+  el.innerHTML = hooks.map(h => `
+    <div class="flex items-center justify-between">
+      <div class="flex items-center gap-2"><div class="size-2 ${dot(h.status)} rounded-full"></div><span class="text-xs font-semibold">${esc(h.name)}</span></div>
+      ${statusBadge(h.status)}
+    </div>`).join('');
+}
+
+// ════════════════════════════════════════════════════════════
+//  HOOKS PAGE
+// ════════════════════════════════════════════════════════════
+async function loadHooks() {
+  const wsId = currentWorkspace.id;
+  const [{ data: hooks }, { data: syncSettings }] = await Promise.all([
+    sb.from('hooks').select('*').eq('workspace_id', wsId).order('created_at'),
+    sb.from('sync_settings').select('*').eq('workspace_id', wsId).maybeSingle(),
+  ]);
+
+  const allHooks = hooks || [];
+  const connected = allHooks.filter(h => h.status !== 'disconnected');
+  const totalReviews = allHooks.reduce((s, h) => s + (h.reviews_synced || 0), 0);
+  const needsAttention = allHooks.filter(h => h.status === 'error').length;
+
+  setText('hooks-connected-count', connected.length);
+  setText('hooks-reviews-count', totalReviews > 999 ? (totalReviews / 1000).toFixed(1) + 'k' : totalReviews);
+  setText('hooks-attention-count', needsAttention);
+
+  const appStoreHooks = allHooks.filter(h => ['appstore', 'playstore', 'amazon', 'huawei'].includes(h.type));
+  const crmHooks      = allHooks.filter(h => ['zendesk', 'intercom', 'slack', 'hubspot', 'salesforce'].includes(h.type));
+
+  renderHooksGrid('hooks-appstores-grid', appStoreHooks, 'appstore');
+  renderHooksGrid('hooks-crm-grid', crmHooks, 'crm');
+
+  if (syncSettings) {
+    setSelectValue('sync-frequency', syncSettings.sync_frequency);
+    setSelectValue('sync-min-rating', syncSettings.min_star_rating);
+    document.getElementById('sync-auto-tag').checked = syncSettings.auto_tag;
+  }
+}
+
+function hookIconConfig(type) {
+  const map = {
+    appstore:  { bg: 'bg-gradient-to-br from-blue-400 to-blue-600',  icon: 'apple',         label: 'Apple · iOS' },
+    playstore: { bg: 'bg-gradient-to-br from-green-400 to-emerald-600', icon: 'play_arrow', label: 'Google · Android' },
+    zendesk:   { bg: 'bg-green-50 border border-green-100',            icon: 'support_agent', iconColor: 'text-green-600', label: 'Support tickets' },
+    intercom:  { bg: 'bg-blue-50 border border-blue-100',              icon: 'chat_bubble',   iconColor: 'text-blue-500', label: 'Conversations' },
+    slack:     { bg: 'bg-purple-50 border border-purple-100',          icon: 'forum',         iconColor: 'text-purple-500', label: 'Team channels' },
+    hubspot:   { bg: 'bg-orange-50 border border-orange-100',          icon: 'hub',           iconColor: 'text-orange-500', label: 'CRM data' },
+  };
+  return map[type] || { bg: 'bg-slate-100', icon: 'link', label: type };
+}
+
+function statusBadgeHtml(status) {
+  const map = { live: 'badge-green', syncing: 'badge-amber', disconnected: 'badge-slate', error: 'badge-red' };
+  const label = status.charAt(0).toUpperCase() + status.slice(1);
+  return `<span class="${map[status] || 'badge-slate'} text-[9px] font-black px-2 py-0.5 rounded-full uppercase">${label}</span>`;
+}
+
+function renderHooksGrid(containerId, hooks, category) {
+  const el = document.getElementById(containerId);
+  const addLabel = category === 'appstore' ? 'Add App Store' : 'Connect Platform';
+  const addSub   = category === 'appstore' ? 'Amazon, Huawei, Samsung…' : 'Slack, HubSpot, G2, Trustpilot…';
+
+  const cards = hooks.map(h => {
+    const cfg = hookIconConfig(h.type);
+    const lastSync = h.last_sync_at ? timeAgo(h.last_sync_at) : 'Never';
+    const iconHtml = cfg.iconColor
+      ? `<div class="h-11 w-11 rounded-xl ${cfg.bg} flex items-center justify-center"><span class="material-symbols-outlined ${cfg.iconColor}">${cfg.icon}</span></div>`
+      : `<div class="h-11 w-11 rounded-xl ${cfg.bg} flex items-center justify-center text-white shadow-sm"><span class="material-symbols-outlined">${cfg.icon}</span></div>`;
+    const extraConfig = h.config && Object.keys(h.config).length
+      ? Object.entries(h.config).slice(0, 2).map(([k,v]) => `<div class="flex justify-between"><span class="text-slate-500">${esc(k)}</span><span class="font-mono font-semibold truncate max-w-[100px]">${esc(String(v))}</span></div>`).join('')
+      : `<div class="flex justify-between"><span class="text-slate-500">Last Sync</span><span class="font-semibold">${lastSync}</span></div><div class="flex justify-between"><span class="text-slate-500">Reviews</span><span class="font-semibold">${(h.reviews_synced || 0).toLocaleString()}</span></div>`;
+
+    return `
+      <div class="bg-white border border-border-light rounded-xl p-5 flex flex-col gap-4">
+        <div class="flex items-start justify-between">
+          <div class="flex items-center gap-3">${iconHtml}<div><h4 class="font-bold text-sm">${esc(h.name)}</h4><p class="text-[11px] text-slate-400">${cfg.label}</p></div></div>
+          ${statusBadgeHtml(h.status)}
+        </div>
+        <div class="bg-slate-50 rounded-lg p-3 space-y-1.5 text-xs">${extraConfig}</div>
+        <div class="flex gap-2 mt-auto">
+          <button onclick="configureHook('${h.id}')" class="flex-1 py-2 bg-slate-50 border border-slate-200 text-slate-700 text-xs font-bold rounded-lg hover:bg-slate-100 transition-colors">Configure</button>
+          <button onclick="disconnectHook('${h.id}')" class="px-3 py-2 bg-slate-50 border border-slate-200 text-slate-400 text-xs rounded-lg hover:bg-red-50 hover:text-red-500 hover:border-red-200 transition-colors"><span class="material-symbols-outlined text-[16px]">link_off</span></button>
+        </div>
+      </div>`;
+  });
+
+  const addCard = `
+    <div onclick="addHook('${category}')" class="border-2 border-dashed border-slate-200 rounded-xl p-5 flex flex-col items-center justify-center gap-3 cursor-pointer hover:border-primary/40 hover:bg-primary/5 transition-all group">
+      <div class="h-11 w-11 rounded-xl bg-slate-100 group-hover:bg-primary/10 flex items-center justify-center transition-colors"><span class="material-symbols-outlined text-slate-400 group-hover:text-primary transition-colors">add</span></div>
+      <div class="text-center"><p class="text-sm font-bold text-slate-600 group-hover:text-primary transition-colors">${addLabel}</p><p class="text-[11px] text-slate-400 mt-0.5">${addSub}</p></div>
+    </div>`;
+
+  el.innerHTML = cards.join('') + addCard;
+}
+
+async function configureHook(hookId) {
+  const name = prompt('Enter integration name (or leave as-is):');
+  if (name === null) return;
+  await sb.from('hooks').update({ name: name || undefined, updated_at: new Date().toISOString() }).eq('id', hookId);
+  await logActivity('settings', 'tune', 'primary', 'Hook configured', `Integration settings updated.`);
+  toast('Hook configuration saved');
+  await loadHooks();
+}
+
+async function disconnectHook(hookId) {
+  if (!confirm('Disconnect this integration? You can reconnect later.')) return;
+  const { error } = await sb.from('hooks').update({ status: 'disconnected' }).eq('id', hookId);
+  if (!error) {
+    toast('Integration disconnected');
+    await logActivity('integration', 'link_off', 'amber', 'Integration disconnected', 'A data source was disconnected.');
+    await loadHooks();
+  }
+}
+
+async function addHook(category) {
+  const types = category === 'appstore'
+    ? ['appstore', 'playstore', 'amazon', 'huawei']
+    : ['zendesk', 'intercom', 'slack', 'hubspot'];
+  const type = prompt(`Integration type (${types.join(', ')}):`)?.toLowerCase().trim();
+  if (!type || !types.includes(type)) { toast('Invalid integration type', true); return; }
+  const name = prompt('Display name:');
+  if (!name) return;
+
+  const { error } = await sb.from('hooks').insert({
+    workspace_id: currentWorkspace.id,
+    type, name,
+    status: 'disconnected',
+    config: {}
+  });
+  if (!error) {
+    toast('Integration added — configure credentials to activate');
+    await logActivity('integration', 'add_link', 'primary', `${name} added`, 'New integration created, pending configuration.');
+    await loadHooks();
+  } else {
+    toast(error.message, true);
+  }
+}
+
+async function saveSyncSettings() {
+  const wsId = currentWorkspace.id;
+  const { error } = await sb.from('sync_settings').upsert({
+    workspace_id: wsId,
+    sync_frequency:  document.getElementById('sync-frequency').value,
+    min_star_rating: document.getElementById('sync-min-rating').value,
+    auto_tag:        document.getElementById('sync-auto-tag').checked,
+  }, { onConflict: 'workspace_id' });
+
+  if (!error) {
+    toast('Sync settings saved ✓');
+    await logActivity('settings', 'tune', 'primary', 'Sync settings updated', 'Global sync preferences saved.');
+  } else {
+    toast(error.message, true);
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+//  CONFIG PAGE
+// ════════════════════════════════════════════════════════════
+async function loadConfig() {
+  const { data, error } = await sb.from('ai_config').select('*').eq('workspace_id', currentWorkspace.id).maybeSingle();
+  if (error || !data) return;
+
+  // Model card
+  document.querySelectorAll('.model-card').forEach(card => {
+    const active = card.dataset.model === data.selected_model;
+    card.classList.toggle('border-primary', active);
+    card.classList.toggle('border-slate-200', !active);
+    card.querySelector('.model-check')?.remove();
+    if (active) {
+      const t = document.createElement('div');
+      t.className = 'model-check absolute top-3 right-3 h-5 w-5 rounded-full bg-primary flex items-center justify-center';
+      t.innerHTML = '<span class="material-symbols-outlined text-white text-xs">check</span>';
+      card.appendChild(t);
+    }
+  });
+
+  // Parameters
+  const tr = document.getElementById('tempRange');
+  const tv = document.getElementById('tempVal');
+  tr.value = data.temperature;
+  tv.textContent = parseFloat(data.temperature).toFixed(1);
+  document.getElementById('cfg-max-tokens').value = data.max_tokens;
+  setSelectValue('cfg-language', data.response_language);
+  document.getElementById('cfg-monthly-cap').value = data.monthly_request_cap;
+  document.getElementById('cfg-rate-limit').value  = data.rate_limit;
+  document.getElementById('cfg-alert-80').checked  = data.alert_at_80;
+  document.getElementById('cfg-logging').checked   = data.conversation_logging;
+  setSelectValue('cfg-log-retention', data.log_retention);
+
+  // Usage bar (from billing)
+  const { data: billing } = await sb.from('billing').select('requests_used,requests_limit').eq('workspace_id', currentWorkspace.id).maybeSingle();
+  if (billing) {
+    const pct = billing.requests_limit > 0 ? Math.round(billing.requests_used / billing.requests_limit * 100) : 0;
+    setText('cfg-usage-label', `${billing.requests_used?.toLocaleString()} / ${billing.requests_limit?.toLocaleString()}`);
+    document.getElementById('cfg-usage-bar').style.width = pct + '%';
+    const warn = document.getElementById('cfg-usage-warn');
+    warn.classList.toggle('hidden', pct < 90);
+  }
+
+  const saved = new Date(data.updated_at);
+  setText('cfg-last-saved', `Last saved ${timeAgo(data.updated_at)}`);
+}
+
+async function saveConfig() {
+  const btn = document.getElementById('cfg-save-btn');
+  btn.disabled = true; btn.innerHTML = '<div class="spinner mx-auto"></div>';
+
+  const selectedModel = document.querySelector('.model-card.border-primary')?.dataset.model || 'gpt4o';
+
+  const { error } = await sb.from('ai_config').upsert({
+    workspace_id:       currentWorkspace.id,
+    selected_model:     selectedModel,
+    temperature:        parseFloat(document.getElementById('tempRange').value),
+    max_tokens:         parseInt(document.getElementById('cfg-max-tokens').value),
+    response_language:  document.getElementById('cfg-language').value,
+    monthly_request_cap: parseInt(document.getElementById('cfg-monthly-cap').value),
+    rate_limit:         parseInt(document.getElementById('cfg-rate-limit').value),
+    alert_at_80:        document.getElementById('cfg-alert-80').checked,
+    conversation_logging: document.getElementById('cfg-logging').checked,
+    log_retention:      document.getElementById('cfg-log-retention').value,
+    updated_at:         new Date().toISOString(),
+  }, { onConflict: 'workspace_id' });
+
+  btn.disabled = false; btn.textContent = 'Save Changes';
+
+  if (!error) {
+    toast('Config saved ✓');
+    setText('cfg-last-saved', 'Last saved just now');
+    await logActivity('settings', 'settings_input_component', 'primary', 'AI config updated', `Model: ${selectedModel}`);
+  } else {
+    toast(error.message, true);
+  }
+}
+
+// Model card click
+document.querySelectorAll('.model-card').forEach(card => {
+  card.addEventListener('click', () => {
+    document.querySelectorAll('.model-card').forEach(c => {
+      c.classList.remove('border-primary'); c.classList.add('border-slate-200');
+      c.querySelector('.model-check')?.remove();
+    });
+    card.classList.add('border-primary'); card.classList.remove('border-slate-200');
+    const t = document.createElement('div');
+    t.className = 'model-check absolute top-3 right-3 h-5 w-5 rounded-full bg-primary flex items-center justify-center';
+    t.innerHTML = '<span class="material-symbols-outlined text-white text-xs">check</span>';
+    card.appendChild(t);
+  });
+});
+
+// Temperature slider
+const tr = document.getElementById('tempRange'), tv = document.getElementById('tempVal');
+if (tr) tr.addEventListener('input', () => tv.textContent = parseFloat(tr.value).toFixed(1));
+
+// ════════════════════════════════════════════════════════════
+//  KEYS PAGE
+// ════════════════════════════════════════════════════════════
+async function loadKeys() {
+  const wsId = currentWorkspace.id;
+  const { data: keys } = await sb.from('api_keys').select('*').eq('workspace_id', wsId).order('created_at', { ascending: false });
+  renderKeysTable(keys || []);
+  webhookSecretValue = null;
+  document.getElementById('webhookSecret').textContent = 'whsec_••••••••••••••••••••••••••••••••';
+}
+
+function renderKeysTable(keys) {
+  const body = document.getElementById('keys-table-body');
+  if (!keys.length) {
+    body.innerHTML = '<div class="px-5 py-8 text-center text-sm text-slate-400">No API keys yet. Create one to get started.</div>';
+    return;
+  }
+  body.innerHTML = keys.map(k => {
+    const statusBadge = k.status === 'active'
+      ? '<span class="badge-green text-[9px] font-black px-2 py-0.5 rounded-full uppercase inline-block">Active</span>'
+      : '<span class="badge-red text-[9px] font-black px-2 py-0.5 rounded-full uppercase inline-block">Revoked</span>';
+    const lastUsed = k.last_used_at ? timeAgo(k.last_used_at) : 'Never';
+    const created  = new Date(k.created_at).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' });
+    const actions  = k.status === 'active'
+      ? `<button onclick="rotateApiKey('${k.id}')" title="Rotate" class="p-1.5 text-slate-400 hover:text-amber-500 hover:bg-amber-50 rounded transition-colors"><span class="material-symbols-outlined text-[16px]">refresh</span></button>
+         <button onclick="revokeApiKey('${k.id}')" class="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors"><span class="material-symbols-outlined text-[16px]">delete</span></button>`
+      : `<button onclick="deleteApiKey('${k.id}')" class="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors"><span class="material-symbols-outlined text-[16px]">delete</span></button>`;
+    const opacity  = k.status === 'active' ? '' : 'opacity-50';
+    return `
+      <div class="grid grid-cols-[2fr_1fr_1fr_1fr_80px] items-center px-5 py-4 border-b border-border-light hover:bg-slate-50 transition-colors ${opacity}">
+        <div>
+          <p class="text-sm font-bold">${esc(k.name)}</p>
+          <div class="flex items-center gap-2 mt-1">
+            <code class="text-xs font-mono text-slate-500 bg-slate-100 px-2 py-0.5 rounded" id="key-${k.id}">${esc(k.key_masked)}</code>
+            ${k.status === 'active' ? `<button onclick="copyKeyMasked('${k.id}')" class="text-slate-400 hover:text-primary transition-colors"><span class="material-symbols-outlined text-[16px]">content_copy</span></button>` : ''}
+          </div>
+          <p class="text-[10px] text-slate-400 mt-0.5">${esc(k.environment)}</p>
+        </div>
+        <span class="text-xs text-slate-500">${created}</span>
+        <span class="text-xs text-slate-500">${lastUsed}</span>
+        ${statusBadge}
+        <div class="flex gap-1 justify-end">${actions}</div>
+      </div>`;
+  }).join('');
+}
+
+function showNewKeyModal() { document.getElementById('newKeyModal').classList.remove('hidden'); }
+function hideNewKeyModal() { document.getElementById('newKeyModal').classList.add('hidden'); }
+
+async function createApiKey() {
+  const name = document.getElementById('new-key-name').value.trim();
+  if (!name) { toast('Enter a key name', true); return; }
+  const env    = document.getElementById('new-key-env').value;
+  const expiry = document.getElementById('new-key-expiry').value;
+
+  const btn = document.getElementById('create-key-btn');
+  btn.disabled = true; btn.innerHTML = '<div class="spinner mx-auto"></div>';
+
+  const prefix    = env === 'Production' ? 'pm_live_' : 'pm_dev_';
+  const rawKey    = prefix + Array.from(crypto.getRandomValues(new Uint8Array(20))).map(b => b.toString(16).padStart(2,'0')).join('');
+  const last4     = rawKey.slice(-4);
+  const masked    = rawKey.slice(0, prefix.length) + '••••••••••' + last4;
+  const keyHash   = await sha256(rawKey);
+
+  const { error } = await sb.from('api_keys').insert({
+    workspace_id: currentWorkspace.id,
+    name, key_prefix: prefix, key_masked: masked,
+    key_hash: keyHash, environment: env, expiry, status: 'active'
+  });
+
+  btn.disabled = false; btn.textContent = 'Generate Key';
+
+  if (!error) {
+    hideNewKeyModal();
+    document.getElementById('new-key-name').value = '';
+    document.getElementById('reveal-key-value').textContent = rawKey;
+    document.getElementById('revealKeyModal').classList.remove('hidden');
+    await logActivity('keys', 'key', 'primary', 'API key created', `"${name}" (${env})`);
+    await loadKeys();
+  } else {
+    toast(error.message, true);
+  }
+}
+
+function closeRevealModal() { document.getElementById('revealKeyModal').classList.add('hidden'); }
+
+function copyRevealedKey() {
+  const val = document.getElementById('reveal-key-value').textContent;
+  navigator.clipboard?.writeText(val);
+  toast('Key copied to clipboard');
+}
+
+function copyKeyMasked(keyId) {
+  toast('Full key not available — shown only once at creation', true);
+}
+
+async function revokeApiKey(keyId) {
+  if (!confirm('Revoke this key? Apps using it will lose access immediately.')) return;
+  const { error } = await sb.from('api_keys').update({ status: 'revoked', updated_at: new Date().toISOString() }).eq('id', keyId);
+  if (!error) {
+    toast('Key revoked');
+    await logActivity('keys', 'key_off', 'amber', 'API key revoked', 'A key was revoked and can no longer be used.');
+    await loadKeys();
+  }
+}
+
+async function rotateApiKey(keyId) {
+  if (!confirm('Rotate this key? The old key will stop working immediately.')) return;
+  const { data: oldKey } = await sb.from('api_keys').select('name,environment,expiry').eq('id', keyId).single();
+  const prefix  = oldKey.environment === 'Production' ? 'pm_live_' : 'pm_dev_';
+  const rawKey  = prefix + Array.from(crypto.getRandomValues(new Uint8Array(20))).map(b => b.toString(16).padStart(2,'0')).join('');
+  const last4   = rawKey.slice(-4);
+  const masked  = rawKey.slice(0, prefix.length) + '••••••••••' + last4;
+  const keyHash = await sha256(rawKey);
+
+  await sb.from('api_keys').update({ status: 'revoked', updated_at: new Date().toISOString() }).eq('id', keyId);
+  await sb.from('api_keys').insert({
+    workspace_id: currentWorkspace.id,
+    name: oldKey.name + ' (Rotated)',
+    key_prefix: prefix, key_masked: masked, key_hash: keyHash,
+    environment: oldKey.environment, expiry: oldKey.expiry, status: 'active'
+  });
+
+  document.getElementById('reveal-key-value').textContent = rawKey;
+  document.getElementById('revealKeyModal').classList.remove('hidden');
+  await logActivity('keys', 'refresh', 'primary', 'API key rotated', `"${oldKey.name}" was rotated.`);
+  await loadKeys();
+}
+
+async function deleteApiKey(keyId) {
+  if (!confirm('Permanently delete this revoked key?')) return;
+  await sb.from('api_keys').delete().eq('id', keyId);
+  toast('Key deleted');
+  await loadKeys();
+}
+
+async function revealWebhook() {
+  if (webhookSecretValue) {
+    document.getElementById('webhookSecret').textContent = webhookSecretValue;
+    setTimeout(() => { document.getElementById('webhookSecret').textContent = 'whsec_••••••••••••••••••••••••••••••••'; webhookSecretValue = null; }, 8000);
+    return;
+  }
+  const { data, error } = await sb.from('webhook_secrets').select('secret').eq('workspace_id', currentWorkspace.id).maybeSingle();
+  if (data) {
+    webhookSecretValue = data.secret;
+    document.getElementById('webhookSecret').textContent = data.secret;
+    setTimeout(() => { document.getElementById('webhookSecret').textContent = 'whsec_••••••••••••••••••••••••••••••••'; webhookSecretValue = null; }, 8000);
+  }
+}
+
+async function rotateWebhook() {
+  if (!confirm('Rotate webhook secret? Any existing webhook implementations will break until updated.')) return;
+  const newSecret = 'whsec_' + Array.from(crypto.getRandomValues(new Uint8Array(32))).map(b => b.toString(16).padStart(2,'0')).join('');
+  const { error } = await sb.from('webhook_secrets').upsert({
+    workspace_id: currentWorkspace.id,
+    secret: newSecret,
+    updated_at: new Date().toISOString()
+  }, { onConflict: 'workspace_id' });
+  if (!error) {
+    webhookSecretValue = newSecret;
+    document.getElementById('webhookSecret').textContent = newSecret;
+    setTimeout(() => { document.getElementById('webhookSecret').textContent = 'whsec_••••••••••••••••••••••••••••••••'; webhookSecretValue = null; }, 8000);
+    toast('Webhook secret rotated ✓');
+    await logActivity('keys', 'webhook', 'primary', 'Webhook secret rotated', 'A new signing secret was generated.');
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+//  SETTINGS PAGE
+// ════════════════════════════════════════════════════════════
+async function loadSettings() {
+  const wsId  = currentWorkspace.id;
+  const uid   = currentUser.id;
+
+  const [{ data: ws }, { data: profile }, { data: notif }] = await Promise.all([
+    sb.from('workspaces').select('*').eq('id', wsId).maybeSingle(),
+    sb.from('profiles').select('*').eq('id', uid).maybeSingle(),
+    sb.from('notification_preferences').select('*').eq('user_id', uid).maybeSingle(),
+  ]);
+
+  if (ws) {
+    document.getElementById('ws-name').value    = ws.name        || '';
+    document.getElementById('ws-website').value = ws.website     || '';
+    document.getElementById('ws-github').value  = ws.github_repo || '';
+    setSelectValue('ws-industry', ws.industry);
+    const initial = (ws.name || 'W')[0].toUpperCase();
+    document.getElementById('ws-logo').textContent = initial;
+  }
+  if (profile) {
+    document.getElementById('profile-name').value  = profile.full_name  || currentUser.user_metadata?.full_name || '';
+    document.getElementById('profile-role').value  = profile.role_title || '';
+    setSelectValue('profile-timezone', profile.timezone);
+  }
+  document.getElementById('profile-email').value = currentUser.email || '';
+
+  if (notif) {
+    document.getElementById('notif-weekly').checked   = notif.weekly_digest;
+    document.getElementById('notif-features').checked = notif.new_feature_suggestion;
+    document.getElementById('notif-sync').checked     = notif.sync_failures;
+    document.getElementById('notif-usage').checked    = notif.usage_limit_alerts;
+  }
+}
+
+async function saveSettings() {
+  const btn = document.getElementById('settings-save-btn');
+  btn.disabled = true; btn.innerHTML = '<div class="spinner mx-auto"></div>';
+
+  const wsName = document.getElementById('ws-name').value.trim();
+  const fullName = document.getElementById('profile-name').value.trim();
+
+  const [wsRes, profileRes, notifRes] = await Promise.all([
+    sb.from('workspaces').update({
+      name:        wsName,
+      website:     document.getElementById('ws-website').value.trim(),
+      industry:    document.getElementById('ws-industry').value,
+      github_repo: document.getElementById('ws-github').value.trim(),
+      updated_at:  new Date().toISOString(),
+    }).eq('id', currentWorkspace.id),
+
+    sb.from('profiles').upsert({
+      id:         currentUser.id,
+      full_name:  fullName,
+      first_name: fullName.split(' ')[0],
+      last_name:  fullName.split(' ').slice(1).join(' '),
+      role_title: document.getElementById('profile-role').value.trim(),
+      timezone:   document.getElementById('profile-timezone').value,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'id' }),
+
+    sb.from('notification_preferences').upsert({
+      user_id:                currentUser.id,
+      weekly_digest:          document.getElementById('notif-weekly').checked,
+      new_feature_suggestion: document.getElementById('notif-features').checked,
+      sync_failures:          document.getElementById('notif-sync').checked,
+      usage_limit_alerts:     document.getElementById('notif-usage').checked,
+      updated_at:             new Date().toISOString(),
+    }, { onConflict: 'user_id' }),
+  ]);
+
+  btn.disabled = false; btn.textContent = 'Save Settings';
+
+  const anyError = wsRes.error || profileRes.error || notifRes.error;
+  if (!anyError) {
+    // Update workspace in local state
+    currentWorkspace.name = wsName;
+    document.getElementById('ws-logo').textContent = (wsName || 'W')[0].toUpperCase();
+    // Update sidebar name
+    document.getElementById('user-name').textContent = fullName;
+    toast('Settings saved ✓');
+    await logActivity('settings', 'settings', 'primary', 'Settings updated', 'Workspace and profile preferences saved.');
+  } else {
+    const msg = (wsRes.error || profileRes.error || notifRes.error)?.message;
+    toast('Error: ' + msg, true);
+  }
+}
+
+async function confirmDeleteData() {
+  if (!confirm('Delete ALL synced review data? This cannot be undone.')) return;
+  await sb.from('feedback_synthesis').delete().eq('workspace_id', currentWorkspace.id);
+  await sb.from('suggested_features').delete().eq('workspace_id', currentWorkspace.id);
+  await sb.from('dashboard_stats').update({ signals_processed: 0, feature_ops: 0, ai_recs: 0 }).eq('workspace_id', currentWorkspace.id);
+  toast('All synced data deleted');
+  await logActivity('warning', 'delete', 'red', 'All data deleted', 'User permanently removed all synced review data.');
+}
+
+async function confirmDeleteWorkspace() {
+  const confirm1 = prompt('Type "DELETE" to confirm you want to permanently delete this workspace and all its data:');
+  if (confirm1 !== 'DELETE') { toast('Workspace deletion cancelled', true); return; }
+  await sb.from('workspaces').delete().eq('id', currentWorkspace.id);
+  toast('Workspace deleted — redirecting…');
+  setTimeout(() => signOut(), 2000);
+}
+
+// ════════════════════════════════════════════════════════════
+//  BILLING PAGE
+// ════════════════════════════════════════════════════════════
+async function loadBilling() {
+  const wsId = currentWorkspace.id;
+  const [{ data: billing }, { data: invoices }] = await Promise.all([
+    sb.from('billing').select('*').eq('workspace_id', wsId).maybeSingle(),
+    sb.from('invoices').select('*').eq('workspace_id', wsId).order('created_at', { ascending: false }).limit(5),
+  ]);
+
+  if (billing) {
+    const planLabels = { starter: 'Starter Plan', pro: 'Pro Plan', enterprise: 'Enterprise' };
+    const planDesc = { starter: '2,000 requests/month · 1 team seat', pro: '10,000 requests/month · 5 team seats · Priority support', enterprise: 'Unlimited requests · Unlimited seats · Custom models' };
+    setText('billing-plan-name', planLabels[billing.plan] || billing.plan);
+    setText('billing-plan-desc', planDesc[billing.plan] || '');
+    setText('billing-price', `$${billing.price}`);
+    const pct = billing.requests_limit > 0 ? Math.round(billing.requests_used / billing.requests_limit * 100) : 0;
+    setText('billing-usage-label', `${billing.requests_used?.toLocaleString()} / ${billing.requests_limit?.toLocaleString()} requests`);
+    document.getElementById('billing-usage-bar').style.width = pct + '%';
+    const renews = billing.renews_at ? new Date(billing.renews_at).toLocaleDateString('en-US', { month:'long', day:'numeric', year:'numeric' }) : '—';
+    setText('billing-renews', `Renews ${renews}`);
+
+    if (billing.payment_last4) {
+      setText('billing-card-last4', `•••• •••• •••• ${billing.payment_last4}`);
+      setText('billing-card-expiry', `Expires ${billing.payment_expiry || '—'}`);
+      const brand = billing.payment_brand?.toUpperCase() || 'CARD';
+      document.getElementById('billing-card-brand').textContent = brand;
+      const brandColors = { VISA: 'bg-blue-600', MASTERCARD: 'bg-red-600', AMEX: 'bg-slate-700' };
+      document.getElementById('billing-card-brand').className = `h-10 w-16 ${brandColors[brand] || 'bg-slate-600'} rounded-lg flex items-center justify-center text-white text-xs font-black`;
+    }
+  }
+
+  if (invoices) {
+    renderInvoices(invoices);
+  }
+}
+
+function renderInvoices(invoices) {
+  const el = document.getElementById('invoices-list');
+  if (!invoices.length) { el.innerHTML = '<p class="text-sm text-slate-400 py-4 text-center">No invoices yet.</p>'; return; }
+  el.innerHTML = invoices.map(inv => `
+    <div class="flex items-center justify-between py-3">
+      <div><p class="text-sm font-semibold">${esc(inv.period_label)}</p><p class="text-xs text-slate-400">${esc(inv.plan_name)} · $${parseFloat(inv.amount).toFixed(2)}</p></div>
+      <div class="flex items-center gap-2">
+        <span class="${inv.status === 'paid' ? 'badge-green' : inv.status === 'failed' ? 'badge-red' : 'badge-amber'} text-[9px] font-black px-2 py-0.5 rounded-full uppercase">${inv.status}</span>
+        <button class="text-primary hover:underline text-xs font-bold">PDF</button>
+      </div>
+    </div>`).join('');
+}
+
+// ════════════════════════════════════════════════════════════
+//  UTILITIES
+// ════════════════════════════════════════════════════════════
+function esc(str) {
+  return String(str || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function setText(id, val) { const el = document.getElementById(id); if (el) el.textContent = val; }
+function setSelectValue(id, val) {
+  const sel = document.getElementById(id);
+  if (!sel || !val) return;
+  for (const opt of sel.options) {
+    if (opt.value === val || opt.textContent === val) { sel.value = opt.value; break; }
+  }
+}
+
+function timeAgo(dateStr) {
+  const diff = Date.now() - new Date(dateStr).getTime();
+  const m = Math.round(diff / 60000);
+  if (m < 1)  return 'Just now';
+  if (m < 60) return `${m}m ago`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.round(h / 24);
+  if (d === 1) return 'Yesterday';
+  if (d < 7)  return `${d} days ago`;
+  return new Date(dateStr).toLocaleDateString('en-US', { month:'short', day:'numeric' });
+}
+
+async function sha256(message) {
+  const msgBuffer = new TextEncoder().encode(message);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
+  return Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2,'0')).join('');
+}
+
+async function logActivity(type, icon, iconColor, title, description) {
+  if (!currentWorkspace) return;
+  await sb.from('activity_log').insert({
+    workspace_id: currentWorkspace.id,
+    user_id:      currentUser.id,
+    type, icon, icon_color: iconColor, title, description
+  });
+}
+
+// ── Toast notifications ──────────────────────────────────────
+function toast(msg, isError = false) {
+  const container = document.getElementById('toast');
+  const el = document.createElement('div');
+  el.className = `toast-item${isError ? ' error' : ''}`;
+  el.innerHTML = `<span class="material-symbols-outlined text-[16px]">${isError ? 'error' : 'check_circle'}</span> ${esc(msg)}`;
+  container.appendChild(el);
+  requestAnimationFrame(() => { requestAnimationFrame(() => el.classList.add('show')); });
+  setTimeout(() => { el.classList.remove('show'); setTimeout(() => el.remove(), 400); }, 3500);
+}
+
+// ── Sign Out ──────────────────────────────────────────────────
+async function signOut() {
+  await sb.auth.signOut();
+  window.location.href = 'auth/auth-v2.html';
+}
+</script>
+</body>
+</html>

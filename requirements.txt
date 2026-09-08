@@ -1,0 +1,36 @@
+# Core API
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+
+# Scheduler (replaces cron)
+apscheduler>=3.10.0
+
+# Database
+sqlalchemy>=2.0.0
+
+# Embeddings (free, local)
+sentence-transformers>=2.7.0
+
+# Vector search (free, local — replaces Pinecone)
+faiss-cpu>=1.8.0
+
+# Clustering for drift detection (free)
+hdbscan>=0.8.33
+scikit-learn>=1.4.0
+
+# Numerics
+numpy>=1.26.0
+
+# HTTP
+requests>=2.31.0
+
+# HTML scraping (taxonomy bootstrapper)
+beautifulsoup4>=4.12.0
+
+# Source ingestion (all free-tier / open-source)
+google-play-scraper>=1.2.7
+app-store-scraper>=0.3.5
+slack_sdk>=3.27.0
+
+# Optional: Jira integration
+# jira>=3.8.0
