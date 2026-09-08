@@ -1,0 +1,7 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Page-specific custom CSS still lives in each HTML file's <style> block
+   (nav-active, toast, spinner, skeleton, badges, keyframes). Move it here as
+   @layer components if you want a single stylesheet. */

@@ -63,9 +63,12 @@ Deployment constraints that shape every recommendation:
 
 ## P2 — Medium
 
-> Status: 2.1, 2.3, 2.4, 2.10 addressed in milestone 4; 2.2 partially (Zendesk
-> requester/subject fallbacks, stable external ids per source — full contract
-> tests against recorded API responses still pending). 2.5–2.9 outstanding.
+> Status: 2.1, 2.3, 2.4, 2.10 addressed in milestone 4; 2.2 partially.
+> 2.7 (CORS) addressed in milestone 8a. 2.8 + 2.9 addressed in milestone 8b:
+> Supabase seed rows start at zero (no fabricated stats), `billing`/
+> `dashboard_stats` RLS lockdown SQL in web/migrations/001, Supabase JS SDK
+> pinned to 2.45.4 with an SRI hash, Tailwind build tooling added
+> (web/BUILD.md — the Play CDN line is marked TODO(prod)). 2.5, 2.6 outstanding.
 
 | ID | Issue | Fix type |
 | --- | --- | --- |

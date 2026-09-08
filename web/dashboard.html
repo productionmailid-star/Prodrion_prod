@@ -4,8 +4,9 @@
   <meta charset="utf-8"/>
   <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
   <title>ProdMind AI</title>
-  <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <!-- TODO(prod): replace the Tailwind Play CDN with a built stylesheet. See web/BUILD.md -->
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js" integrity="sha384-GFr3yTh5lJznCbZfpTtXnwboFsxqtTQoeTZCRHhE0579KrRmlCzen5AA8ohaB5ug" crossorigin="anonymous"></script>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet"/>
   <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet"/>
   <script>
@@ -112,6 +113,10 @@
           <span class="material-symbols-outlined text-[20px]">notifications</span>
           <span class="absolute top-1.5 right-1.5 size-1.5 bg-red-500 rounded-full"></span>
         </button>
+        <span id="credit-pill" class="hidden items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-100 text-slate-600 text-xs font-bold">
+          <span class="material-symbols-outlined text-[14px] text-primary">toll</span>
+          <span id="credit-balance">—</span>
+        </span>
         <button class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-primary text-white text-xs font-bold hover:bg-primary/90 transition-colors shadow-sm">
           <span class="material-symbols-outlined text-[16px]">auto_awesome</span> Ask AI
         </button>
@@ -560,6 +565,9 @@
 const SUPABASE_URL  = 'https://nbpmkvpeqtvtczlqgwax.supabase.co';
 const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5icG1rdnBlcXR2dGN6bHFnd2F4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzIxMTYzNjQsImV4cCI6MjA4NzY5MjM2NH0.isx0SkgR5eRqhaYedTpInqu7cO6cti5fNALagOU2Xj0';
 
+// Prodrion backend API base (e.g. https://api.example.com). Empty = disabled.
+const API_BASE = '';
+
 const { createClient } = supabase;
 const sb = createClient(SUPABASE_URL, SUPABASE_ANON);
 
@@ -577,8 +585,26 @@ let webhookSecretValue = null; // cached after first reveal
   currentUser = session.user;
   populateUserUI(session.user);
   await ensureWorkspace();
+  loadCredits(session.access_token);   // fire-and-forget
   await loadPage('dashboard');
 })();
+
+// ── Credit balance (from the Prodrion backend) ──────────────
+async function loadCredits(accessToken) {
+  if (!API_BASE) return;
+  try {
+    const res = await fetch(`${API_BASE}/me/credits`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!res.ok) return;
+    const { balance, enabled } = await res.json();
+    if (!enabled) return;
+    const pill = document.getElementById('credit-pill');
+    document.getElementById('credit-balance').textContent = `${balance.toLocaleString()} credits`;
+    pill.classList.remove('hidden');
+    pill.classList.add('flex');
+  } catch (_) { /* backend unreachable — leave the pill hidden */ }
+}
 
 sb.auth.onAuthStateChange((event, session) => {
   if (event === 'SIGNED_OUT' || !session) window.location.href = 'auth/auth-v2.html';
@@ -597,14 +623,14 @@ async function ensureWorkspace() {
   }).select().single();
   currentWorkspace = ws;
 
-  // Seed defaults
+  // Seed the rows the client is allowed to own. billing / dashboard_stats are
+  // created by the on_auth_user_created trigger and written only by the
+  // backend (see web/migrations/001_billing_stats_readonly.sql).
   if (ws) {
     await Promise.all([
       sb.from('notification_preferences').upsert({ user_id: currentUser.id }),
       sb.from('ai_config').upsert({ workspace_id: ws.id }),
       sb.from('sync_settings').upsert({ workspace_id: ws.id }),
-      sb.from('billing').upsert({ workspace_id: ws.id, plan: 'pro', price: 79, requests_limit: 10000, seats_limit: 5, renews_at: new Date(Date.now() + 30 * 86400000).toISOString().split('T')[0] }),
-      sb.from('dashboard_stats').upsert({ workspace_id: ws.id, signals_processed: 12420, signals_change_pct: 12, feature_ops: 42, feature_ops_change: 5, active_experiments: 8, ai_recs: 15, ai_recs_new_today: 8 }),
       sb.from('webhook_secrets').upsert({ workspace_id: ws.id, secret: 'whsec_' + Array.from(crypto.getRandomValues(new Uint8Array(32))).map(b => b.toString(16).padStart(2,'0')).join('') }),
     ]);
   }
