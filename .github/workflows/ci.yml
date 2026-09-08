@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main, production-hardening]
+  pull_request:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # The current unit tests stub the heavy runtime stack (faiss,
+      # sentence-transformers, apscheduler, ollama) via tests/conftest.py, so CI
+      # only needs the lightweight libraries the pure code paths touch plus the
+      # dev tooling. Later milestones that add integration tests will install
+      # from requirements.txt.
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install fastapi numpy requests beautifulsoup4 \
+                      pytest pytest-asyncio httpx ruff black
+
+      - name: Ruff (lint)
+        run: ruff check .
+
+      - name: Black (format check)
+        run: black --check tests/
+
+      - name: Pytest
+        run: pytest
