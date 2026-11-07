@@ -17,8 +17,16 @@ if str(_REPO_AGENT_DIR) not in sys.path:
 log = logging.getLogger("prodrion.repo_agent")
 
 
-def analyze(repo_path: str, goal: str) -> dict:
+def analyze(repo_path: str, goal: str, index_path: str | None = None) -> dict:
     """Run scan -> chunk -> index -> validate -> discover -> locate -> plan.
+
+    ``index_path``, if given, is a job-scoped directory for the vector index
+    — callers analysing more than one repo over the process lifetime (the
+    production worker) must pass a distinct path per job, since the index
+    isn't otherwise keyed by repo and a shared/default one would silently
+    serve stale, wrong-repo results after the first analysis. The standalone
+    CLI (repo-agent/main.py) omits it and gets the old single-repo-at-a-time
+    default (see CodeIndexer).
 
     Returns ``{"status", "plan"?, "results"?, "error"?}``.
     """
@@ -39,7 +47,7 @@ def analyze(repo_path: str, goal: str) -> dict:
     for rel in files:
         chunks.extend(chunker.chunk_file(Path(repo_path) / rel))
 
-    indexer = CodeIndexer()
+    indexer = CodeIndexer(index_path) if index_path else CodeIndexer()
     if indexer.is_empty():
         indexer.add_chunks(chunks)
 

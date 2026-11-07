@@ -68,7 +68,7 @@ def test_analyze_repo_job_creates_issue(tmp_db, tmp_path, monkeypatch):
     monkeypatch.setattr(
         repo_agent_core,
         "analyze",
-        lambda path, goal: {
+        lambda path, goal, index_path=None: {
             "status": "ok",
             "plan": {"goal": goal, "files_to_modify": ["x.py"], "hit_count": 1},
             "results": [{"warnings": [], "patch": "- old\n+ new"}],

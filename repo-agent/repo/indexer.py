@@ -4,7 +4,7 @@ from llm import get_embedder
 from repo.splitter import split_text
 
 
-def _make_client():
+def _make_client(persist_path: str):
     """
     Support both modern chromadb (>=0.4) and older versions gracefully.
     """
@@ -12,7 +12,7 @@ def _make_client():
         import chromadb
 
         # Modern API — PersistentClient (>=0.4.0)
-        return chromadb.PersistentClient(path="./chroma_db")
+        return chromadb.PersistentClient(path=persist_path)
     except AttributeError:
         # Older API fallback
         import chromadb
@@ -20,7 +20,7 @@ def _make_client():
 
         return chromadb.Client(
             Settings(
-                persist_directory="./chroma_db",
+                persist_directory=persist_path,
                 anonymized_telemetry=False,
             )
         )
@@ -30,8 +30,17 @@ class CodeIndexer:
 
     COLLECTION_NAME = "codebase"
 
-    def __init__(self):
-        self.client = _make_client()
+    def __init__(self, persist_path: str = "./chroma_db"):
+        """``persist_path`` must be unique per repo being analysed — callers
+        that index more than one repo over the process lifetime (the
+        production worker) MUST pass a distinct, job-scoped path, or every
+        repo after the first silently reuses the first repo's stale index
+        (``is_empty()`` would already be False, so nothing gets re-indexed,
+        and search() returns chunks from the wrong codebase entirely). The
+        standalone interactive CLI (repo-agent/main.py), which only ever
+        analyses one repo per run, is fine relying on the default.
+        """
+        self.client = _make_client(persist_path)
         self.collection = self.client.get_or_create_collection(name=self.COLLECTION_NAME)
 
     # ── Status helpers ────────────────────────────────────────

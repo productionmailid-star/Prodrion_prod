@@ -195,12 +195,18 @@ def _analyze_repo(payload: dict) -> None:
     goal = payload["goal"]
     safe = repo.replace("/", "__")
     dest = Path(settings.github_clone_dir).resolve() / inst / safe
+    # Sibling of the clone, not nested inside it — keeps the vector index out
+    # of RepoScanner's view and gives every job its own index (see
+    # repo_agent_core.analyze's index_path docstring: a shared/default index
+    # would silently serve stale, wrong-repo results after the first job).
+    index_path = dest.parent / f"{dest.name}__chromaidx"
 
     github_app.clone_repo(inst, repo, dest)
     try:
-        result = repo_agent_core.analyze(str(dest), goal)
+        result = repo_agent_core.analyze(str(dest), goal, index_path=str(index_path))
     finally:
         shutil.rmtree(dest, ignore_errors=True)
+        shutil.rmtree(index_path, ignore_errors=True)
 
     if result["status"] != "ok":
         raise RuntimeError(f"repo analysis failed: {result.get('error', result['status'])}")
