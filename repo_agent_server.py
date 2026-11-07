@@ -1,8 +1,10 @@
 """
 repo_agent_server.py
 --------------------
-A thin FastAPI wrapper around the repo-agent pipeline.
-Place this file at the project root (same level as goal_to_repo_agent.py).
+A thin FastAPI wrapper around the repo-agent pipeline, for manual/interactive
+use (dev tooling). The production path — worker.py's "analyze_repo" job,
+triggered by the dashboard's "Generate fix" button — calls
+repo_agent_core.analyze() directly and does not go through this server.
 
 Exposes:
   POST /api/run          — start a pipeline session
@@ -18,6 +20,7 @@ Does NOT modify any file inside repo-agent/.
 import asyncio
 import json
 import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -37,8 +40,27 @@ from security import require_bearer_token
 # ── App ──────────────────────────────────────────────────────────────────────
 app = FastAPI(title="Repo Agent Server", version="1.0.0")
 
-# In-memory session store  { session_id: asyncio.Queue }
-_sessions: dict[str, asyncio.Queue] = {}
+# In-memory session store  { session_id: (asyncio.Queue, created_at_epoch) }.
+# A run that's never streamed (client starts /api/run then never opens
+# /api/stream/{id}) would otherwise leak here forever; _sweep_stale_sessions
+# evicts anything older than the stream's own timeout.
+_sessions: dict[str, tuple[asyncio.Queue, float]] = {}
+_SESSION_MAX_AGE_SECONDS = 300
+_SESSION_SWEEP_INTERVAL_SECONDS = 60
+
+
+async def _sweep_stale_sessions() -> None:
+    while True:
+        await asyncio.sleep(_SESSION_SWEEP_INTERVAL_SECONDS)
+        cutoff = time.monotonic() - _SESSION_MAX_AGE_SECONDS
+        stale = [sid for sid, (_, created_at) in _sessions.items() if created_at < cutoff]
+        for sid in stale:
+            _sessions.pop(sid, None)
+
+
+@app.on_event("startup")
+async def _start_session_sweeper() -> None:
+    app.state.sweeper_task = asyncio.create_task(_sweep_stale_sessions())
 
 # ── Config ───────────────────────────────────────────────────────────────────
 DEFAULT_REPO_PATH = str(REPO_AGENT_DIR)
@@ -87,7 +109,7 @@ async def run(req: RunRequest):
 
     session_id = str(uuid.uuid4())
     queue: asyncio.Queue = asyncio.Queue()
-    _sessions[session_id] = queue
+    _sessions[session_id] = (queue, time.monotonic())
 
     loop = asyncio.get_event_loop()
 
@@ -103,14 +125,14 @@ async def stream(session_id: str):
     if session_id not in _sessions:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    queue = _sessions[session_id]
+    queue, _ = _sessions[session_id]
 
     async def event_generator():
         try:
             while True:
                 # Wait for the next event (with a generous timeout)
                 try:
-                    event = await asyncio.wait_for(queue.get(), timeout=300)
+                    event = await asyncio.wait_for(queue.get(), timeout=_SESSION_MAX_AGE_SECONDS)
                 except asyncio.TimeoutError:
                     yield "event: error\ndata: {\"error\": \"pipeline timed out\"}\n\n"
                     break

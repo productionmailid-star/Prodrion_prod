@@ -20,6 +20,9 @@ echo "==> Applying schema / migrations"
 sudo -u "$APP_USER" env $(grep -v '^#' /etc/prodrion/prodrion.env | xargs) \
     "$APP_DIR/.venv/bin/python" -c "from db import init_db; init_db()"
 
+echo "==> Building dashboard CSS"
+sudo -u "$APP_USER" bash -c "cd '$APP_DIR/web' && npm install --no-audit --no-fund && npm run build:css"
+
 echo "==> Restarting services"
 sudo systemctl restart prodrion-api prodrion-worker
 

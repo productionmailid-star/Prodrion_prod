@@ -17,9 +17,9 @@ jobs:
           cache: pip
 
       # The current unit tests stub the heavy runtime stack (faiss,
-      # sentence-transformers, apscheduler, ollama) via tests/conftest.py, so CI
-      # only needs the lightweight libraries the pure code paths touch plus the
-      # dev tooling. Later milestones that add integration tests will install
+      # sentence-transformers, ollama) via tests/conftest.py, so CI only needs
+      # the lightweight libraries the pure code paths touch plus the dev
+      # tooling. Later milestones that add integration tests will install
       # from requirements.txt.
       - name: Install dependencies
         run: |
@@ -34,7 +34,8 @@ jobs:
       - name: Black (format check)
         run: >-
           black --check tests/ config.py security.py db.py jobs.py worker.py
-          observability.py credits.py github_app.py repo_agent_core.py llm/
+          observability.py credits.py github_app.py repo_agent_core.py
+          supabase_sync.py llm/
 
       - name: Pytest
         run: pytest

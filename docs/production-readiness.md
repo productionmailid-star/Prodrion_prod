@@ -47,18 +47,22 @@ Deployment constraints that shape every recommendation:
 > installation-token cache, sandboxed shallow clone with a size cap,
 > issue creation, webhook-signature verify) + an `analyze_repo` job type that
 > clones -> runs the repo-agent -> opens a GitHub issue with the patch.
-> 1.2, 1.3, 1.7, 1.8 outstanding.
+> 1.3 addressed in milestones 10-14 (see the milestone plan below): the
+> backend and the dashboard now share a `workspace_id`, and
+> `supabase_sync.py` is the real bridge between them — milestone 8's
+> "Resolved" note for this item was premature; the two halves remained
+> unsynced until now. 1.2, 1.7, 1.8 outstanding.
 
 | ID | Issue | Fix type |
 | --- | --- | --- |
 | 1.1 | **Synchronous LLM work in request handlers.** `POST /webhook/feedback` runs the full pipeline inline; no queue, retry, or dead-letter. | architectural |
 | 1.2 | **SQLite under concurrent threads** with no WAL/busy-timeout, and **no idempotency key** — re-polled sources create duplicate rows that corrupt every downstream count. | quick fix (WAL + UNIQUE key); Postgres later |
-| 1.3 | **Two disconnected halves** (`web/` vs `feedback_platform.py`). Resolved: they converge into one product. | architectural |
+| 1.3 | **Two disconnected halves** (`web/` vs `feedback_platform.py`). Resolved in milestones 10-14: shared `workspace_id`, `supabase_sync.py` bridge, dashboard "Generate fix" wired to the real pipeline. | architectural |
 | 1.4 | **Client-controlled billing/usage.** The dashboard writes `billing`/`dashboard_stats` directly from the browser under owner-write RLS. With credit-based pricing this must be server-authoritative. | architectural |
 | 1.5 | **Error handling swallows everything.** Broad `except Exception` returning `""`/`None`/`[]`; failures look like empty data. | quick fix |
 | 1.6 | **No structured logging, request IDs, metrics, or real health checks.** | quick fix → infra |
 | 1.7 | **Zero tests, no CI.** | architectural (process) |
-| 1.8 | **Dependencies unpinned/unaudited.** `>=` bounds only, no lockfile; `sqlalchemy` unused; `reviewer.py` deps missing; fragile store scrapers. | quick fix |
+| 1.8 | **Dependencies unpinned/unaudited.** `>=` bounds only, no lockfile; `sqlalchemy` unused; fragile store scrapers. `reviewer.py` (whose deps were missing) is deleted as of milestone 13 — superseded by the in-pipeline sentiment field. Still outstanding: a real lockfile. | quick fix |
 | 1.9 | **GitHub App + user-repo access** is a new surface: token storage, sandboxed clone of untrusted repo content, PR/ticket creation, rate limits. | architectural |
 
 ## P2 — Medium
@@ -106,3 +110,13 @@ model; add a
 | 7 | GitHub App + credit ledger | Install flow, encrypted token storage, sandboxed clone + analysis, PR/ticket creation, atomic credit ledger, RLS lockdown. Own design note first. |
 | 8 | Frontend hardening | Build Tailwind, pin Supabase SDK + SRI, seed zeros, wire dashboard to the API, CORS allow-list. |
 | 9 | Deploy | systemd units, nginx + TLS, deploy script, runbook. **Done** — `deploy/` + `docs/deployment.md`. |
+| 10 | Multi-tenant data model | `workspace_id` on `feedback`/`taxonomy`/`jira_tickets`/`users`/`sync_state`/`buckets` (SQLite); per-workspace FAISS index and taxonomy/credit scoping. Corrects milestone 8's "1.3 Resolved" — the backend and the dashboard were still two unsynced systems with no shared workspace key. |
+| 11 | Supabase service-role bridge | `supabase_sync.py`: a direct-Postgres, server-only read of `hooks`/`sync_settings`/`workspaces` and write of `suggested_features`/`activity_log`/`dashboard_stats`/billing usage. `PRODRION_SUPABASE_DB_URL`, required in production. |
+| 12 | Dashboard <-> backend wiring | `require_workspace` resolves a signed-in user's real workspace; `GET /me/credits` fixed to use it; new `POST /me/repo-analysis` ("Generate fix") and `POST /me/github/install-callback`. |
+| 13 | Sentiment filter + bucket lifecycle | `classify_feedback` now returns sentiment in the same LLM call; only negative feedback feeds `rebuild_buckets()` (new `buckets` table). `reviewer.py` and `goal_to_repo_agent.py` deleted — superseded, were dead/disconnected code. |
+| 14 | Per-workspace connectors, no more APScheduler | Zendesk/App Store/Play Store/Slack pollers take credentials from the dashboard's own `hooks` row instead of global env vars. Periodic work (polling, bucket rebuilds, Jira/HubSpot sync, drift/velocity) is now self-rescheduling jobs on the existing durable queue (`jobs.has_active`, `delay_seconds`) instead of an in-process scheduler. |
+| 15 | Cleanup | Tailwind build wired into the served pages (Play CDN removed), `repo_agent_server.py` session-dict TTL sweep, dead Zendesk/App-Store/Play-Store/`feedback_api_url`/`repo_agent_url` settings removed. |
+
+Milestones 10-15 intentionally leave real payment collection untouched:
+`POST /webhook/stripe` stays the admin-gated stub it was — Stripe integration
+is tracked separately and out of scope here.

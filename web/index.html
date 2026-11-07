@@ -3,17 +3,11 @@
 <meta charset="utf-8"/>
 <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
 <title>ProdMind - AI Product Intelligence</title>
-<!-- TODO(prod): replace the Tailwind Play CDN with a built stylesheet. See web/BUILD.md -->
-<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<!-- Built stylesheet (web/BUILD.md: `npm run build:css` -> web/dist/app.css). -->
+<link rel="stylesheet" href="/dist/app.css">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js" integrity="sha384-GFr3yTh5lJznCbZfpTtXnwboFsxqtTQoeTZCRHhE0579KrRmlCzen5AA8ohaB5ug" crossorigin="anonymous"></script>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet"/>
 <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet"/>
-<script>
-  tailwind.config = {
-    darkMode:"class",
-    theme:{extend:{colors:{"primary":"#1f7a63","primary-dark":"#165948","background-light":"#ffffff","background-subtle":"#F9FAFB","background-dark":"#131f1c","text-main":"#121716","text-muted":"#6B7280"},fontFamily:{"display":["Inter","sans-serif"],"body":["Inter","sans-serif"]},boxShadow:{"soft":"0 4px 6px -1px rgba(0,0,0,0.05)","glow":"0 0 15px rgba(31,122,99,0.15)"}}}
-  }
-</script>
 <style>
   body{font-family:'Inter',sans-serif;-webkit-font-smoothing:antialiased;min-height:max(884px,100dvh);}
 </style>
@@ -109,8 +103,8 @@
 </main>
 
 <script>
-const SUPABASE_URL  = 'https://nbpmkvpeqtvtczlqgwax.supabase.co';
-const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5icG1rdnBlcXR2dGN6bHFnd2F4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzIxMTYzNjQsImV4cCI6MjA4NzY5MjM2NH0.isx0SkgR5eRqhaYedTpInqu7cO6cti5fNALagOU2Xj0';
+const SUPABASE_URL  = 'https://nvsiexpbfiejdztidcra.supabase.co';
+const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im52c2lleHBiZmllamR6dGlkY3JhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTQwMzk1ODQsImV4cCI6MjEwOTYxNTU4NH0.XuwtIUkPUpnZemRdTX1G3AJxu0GUiuOZQJ9ZJIxQ3WE';
 
 const { createClient } = supabase;
 const sb = createClient(SUPABASE_URL, SUPABASE_ANON);

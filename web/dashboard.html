@@ -4,26 +4,11 @@
   <meta charset="utf-8"/>
   <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
   <title>ProdMind AI</title>
-  <!-- TODO(prod): replace the Tailwind Play CDN with a built stylesheet. See web/BUILD.md -->
-<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+  <!-- Built stylesheet (web/BUILD.md: `npm run build:css` -> web/dist/app.css). -->
+  <link rel="stylesheet" href="/dist/app.css">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js" integrity="sha384-GFr3yTh5lJznCbZfpTtXnwboFsxqtTQoeTZCRHhE0579KrRmlCzen5AA8ohaB5ug" crossorigin="anonymous"></script>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet"/>
   <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet"/>
-  <script>
-    tailwind.config = {
-      darkMode: "class",
-      theme: {
-        extend: {
-          colors: {
-            "primary": "#1f7a63",
-            "background-light": "#f6f8f7",
-            "border-light": "#e2e8e7",
-          },
-          fontFamily: { "display": ["Inter", "sans-serif"] },
-        },
-      },
-    }
-  </script>
   <style>
     body { font-family: 'Inter', sans-serif; }
     .material-symbols-outlined { font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24; }
@@ -436,8 +421,12 @@
               </select>
             </div>
           </div>
-          <div><label class="text-xs font-bold text-slate-700 block mb-1.5">GitHub Repo <span class="text-slate-400 font-normal">(helps AI tailor insights)</span></label>
+          <div><label class="text-xs font-bold text-slate-700 block mb-1.5">GitHub Repo <span class="text-slate-400 font-normal">(where "Generate fix" opens issues)</span></label>
             <input id="ws-github" type="text" placeholder="https://github.com/your-org/repo" class="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-primary/20"/>
+          </div>
+          <div class="flex items-center gap-3">
+            <button type="button" id="github-connect-btn" onclick="connectGithub()" class="px-3 py-2 text-xs font-bold rounded-lg bg-slate-900 text-white hover:bg-slate-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">Connect GitHub</button>
+            <span id="github-connect-status" class="text-xs text-slate-500"></span>
           </div>
         </section>
 
@@ -562,11 +551,15 @@
 // ════════════════════════════════════════════════════════════
 //  SUPABASE CONFIG
 // ════════════════════════════════════════════════════════════
-const SUPABASE_URL  = 'https://nbpmkvpeqtvtczlqgwax.supabase.co';
-const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5icG1rdnBlcXR2dGN6bHFnd2F4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzIxMTYzNjQsImV4cCI6MjA4NzY5MjM2NH0.isx0SkgR5eRqhaYedTpInqu7cO6cti5fNALagOU2Xj0';
+const SUPABASE_URL  = 'https://nvsiexpbfiejdztidcra.supabase.co';
+const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im52c2lleHBiZmllamR6dGlkY3JhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTQwMzk1ODQsImV4cCI6MjEwOTYxNTU4NH0.XuwtIUkPUpnZemRdTX1G3AJxu0GUiuOZQJ9ZJIxQ3WE';
 
 // Prodrion backend API base (e.g. https://api.example.com). Empty = disabled.
 const API_BASE = '';
+// GitHub App public install page (e.g. https://github.com/apps/your-app/installations/new).
+// Empty = disabled. Create the App's "Setup URL" to redirect back here
+// (this page) with ?installation_id=... appended.
+const GITHUB_APP_INSTALL_URL = '';
 
 const { createClient } = supabase;
 const sb = createClient(SUPABASE_URL, SUPABASE_ANON);
@@ -586,8 +579,38 @@ let webhookSecretValue = null; // cached after first reveal
   populateUserUI(session.user);
   await ensureWorkspace();
   loadCredits(session.access_token);   // fire-and-forget
+  await handleGithubInstallRedirect(session.access_token);
   await loadPage('dashboard');
 })();
+
+// GitHub redirects back here with ?installation_id=...&setup_action=install
+// after the user completes the App install flow (see GITHUB_APP_INSTALL_URL).
+async function handleGithubInstallRedirect(accessToken) {
+  const params = new URLSearchParams(window.location.search);
+  const installationId = params.get('installation_id');
+  if (!installationId || !API_BASE) return;
+  try {
+    const res = await fetch(`${API_BASE}/me/github/install-callback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
+      body: JSON.stringify({ installation_id: installationId }),
+    });
+    if (res.ok) toast('GitHub connected.');
+    else toast('Could not confirm the GitHub install.', true);
+  } catch (_) {
+    toast('Backend unreachable — GitHub install not confirmed.', true);
+  } finally {
+    params.delete('installation_id');
+    params.delete('setup_action');
+    const clean = window.location.pathname + (params.toString() ? `?${params}` : '');
+    window.history.replaceState({}, '', clean);
+  }
+}
+
+function connectGithub() {
+  if (!GITHUB_APP_INSTALL_URL) { toast('GitHub App not configured for this deployment.', true); return; }
+  window.location.href = GITHUB_APP_INSTALL_URL;
+}
 
 // ── Credit balance (from the Prodrion backend) ──────────────
 async function loadCredits(accessToken) {
@@ -732,7 +755,7 @@ function renderSuggestedFeatures(features) {
   const impactLabel = { high: 'High Impact', medium: 'Medium Impact', low: 'Low Impact' };
   const confColor = c => c >= 85 ? 'text-primary' : c >= 70 ? 'text-amber-500' : 'text-slate-500';
   grid.innerHTML = features.slice(0, 4).map(f => `
-    <div class="group bg-white border border-border-light rounded-xl p-5 hover:border-primary/40 hover:shadow-md transition-all cursor-pointer">
+    <div class="group bg-white border border-border-light rounded-xl p-5 hover:border-primary/40 hover:shadow-md transition-all">
       <div class="flex justify-between items-start mb-3">
         <div class="h-10 w-10 bg-slate-100 rounded-lg flex items-center justify-center group-hover:bg-primary group-hover:text-white transition-colors"><span class="material-symbols-outlined">${esc(f.icon)}</span></div>
         <div class="text-right"><div class="text-[9px] font-bold text-slate-400 uppercase">Confidence</div><div class="text-lg font-black ${confColor(f.confidence)}">${f.confidence}%</div></div>
@@ -743,7 +766,45 @@ function renderSuggestedFeatures(features) {
         <span class="px-2 py-0.5 ${impactMap[f.impact_level] || 'badge-slate'} text-[9px] font-black rounded uppercase">${impactLabel[f.impact_level] || f.impact_level}</span>
         <span class="px-2 py-0.5 badge-slate text-[9px] font-black rounded uppercase">${f.sources_count} Sources</span>
       </div>
+      <button type="button" class="generate-fix-btn mt-3 w-full text-xs font-bold py-1.5 rounded-lg bg-primary/10 text-primary hover:bg-primary hover:text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed" data-label="${esc(f.title)}" ${API_BASE ? '' : 'disabled title="Backend not configured"'}>
+        Generate fix
+      </button>
     </div>`).join('');
+}
+
+// Delegated click handler: one listener for every "Generate fix" button,
+// since the grid's innerHTML is replaced on every loadDashboard().
+document.addEventListener('click', async (e) => {
+  const btn = e.target.closest('.generate-fix-btn');
+  if (!btn || btn.disabled) return;
+  await generateFix(btn.dataset.label, btn);
+});
+
+// ── "Generate fix": turn a suggested bucket into a real GitHub issue ───
+async function generateFix(label, btn) {
+  if (!API_BASE) { toast('Backend not configured for this deployment.', true); return; }
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Queuing…';
+  try {
+    const { data: { session } } = await sb.auth.getSession();
+    const res = await fetch(`${API_BASE}/me/repo-analysis`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({ label }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
+    btn.textContent = 'Queued ✓';
+    toast(`Queued "${label}" — a GitHub issue will appear once analysis finishes.`);
+  } catch (err) {
+    btn.disabled = false;
+    btn.textContent = original;
+    toast(err.message || 'Could not queue this fix.', true);
+  }
 }
 
 function renderFeedbackSynthesis(items) {
@@ -1219,6 +1280,19 @@ async function loadSettings() {
     setSelectValue('ws-industry', ws.industry);
     const initial = (ws.name || 'W')[0].toUpperCase();
     document.getElementById('ws-logo').textContent = initial;
+
+    const connectBtn = document.getElementById('github-connect-btn');
+    const statusEl = document.getElementById('github-connect-status');
+    if (ws.github_installation_id) {
+      statusEl.textContent = 'Connected ✓';
+      statusEl.className = 'text-xs text-green-600 font-medium';
+      connectBtn.textContent = 'Reconnect GitHub';
+    } else {
+      statusEl.textContent = 'Not connected — "Generate fix" needs this.';
+      statusEl.className = 'text-xs text-slate-500';
+      connectBtn.textContent = 'Connect GitHub';
+    }
+    connectBtn.disabled = !GITHUB_APP_INSTALL_URL;
   }
   if (profile) {
     document.getElementById('profile-name').value  = profile.full_name  || currentUser.user_metadata?.full_name || '';
@@ -1289,12 +1363,15 @@ async function saveSettings() {
 }
 
 async function confirmDeleteData() {
-  if (!confirm('Delete ALL synced review data? This cannot be undone.')) return;
+  // dashboard_stats is backend-written-only since migration 001 (owner UPDATE
+  // was dropped) — only clear what the browser actually owns. The underlying
+  // review/feedback data lives in the backend (SQLite), not Supabase; deleting
+  // that requires a backend data-deletion endpoint, which doesn't exist yet.
+  if (!confirm('Clear the AI insights shown on this dashboard (synthesis + suggested fixes)? This does not delete the underlying reviews.')) return;
   await sb.from('feedback_synthesis').delete().eq('workspace_id', currentWorkspace.id);
   await sb.from('suggested_features').delete().eq('workspace_id', currentWorkspace.id);
-  await sb.from('dashboard_stats').update({ signals_processed: 0, feature_ops: 0, ai_recs: 0 }).eq('workspace_id', currentWorkspace.id);
-  toast('All synced data deleted');
-  await logActivity('warning', 'delete', 'red', 'All data deleted', 'User permanently removed all synced review data.');
+  toast('Dashboard insights cleared');
+  await logActivity('warning', 'delete', 'red', 'Insights cleared', 'User cleared the AI synthesis and suggested fixes shown on the dashboard.');
 }
 
 async function confirmDeleteWorkspace() {

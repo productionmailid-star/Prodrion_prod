@@ -6,12 +6,15 @@ Stack:
   - LLM + embeddings            → pluggable provider (llm.get_llm / get_embedder);
                                   Gemini free-tier API by default, Ollama for local dev
   - FAISS                       → in-process vector index
-  - SQLite                      → feedback / taxonomy / ticket store
-  - APScheduler                 → in-process polling + drift jobs
+  - SQLite                      → feedback / taxonomy / ticket / bucket store
+  - jobs.py / worker.py         → durable job queue; self-rescheduling "*_tick"
+                                  jobs replace the old in-process scheduler
+  - supabase_sync.py            → per-workspace hooks/config in, suggested
+                                  fixes/activity/stats out to the dashboard
   - FastAPI                     → webhook receiver + query API
   - HDBSCAN                     → drift-detection clustering
   - BeautifulSoup4              → taxonomy bootstrapper scraper
-  - Slack SDK                   → alerts + ingestion
+  - Slack SDK                   → alerts + per-workspace ingestion
   - google-play-scraper         → Play Store reviews
   - app-store-scraper           → iOS reviews
 
@@ -42,12 +45,12 @@ import faiss
 import numpy as np
 import requests
 import uvicorn
-from apscheduler.schedulers.background import BackgroundScheduler
 from bs4 import BeautifulSoup
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 
 import credits
 import jobs
+import supabase_sync
 from config import settings
 from credits import InsufficientCredits
 from db import (
@@ -68,6 +71,7 @@ from security import (
     is_safe_public_url,
     require_bearer_token,
     require_supabase_user,
+    require_workspace,
     verify_slack_signature,
     verify_webhook_secret,
 )
@@ -127,6 +131,7 @@ class StandardFeedbackObject:
     Metadata is always preserved.
     """
     id:         str = field(default_factory=lambda: str(uuid.uuid4()))
+    workspace_id: str = field(default_factory=lambda: settings.default_workspace_id)
     text:       str = ""
     user_id:    str = ""
     user_email: str = ""
@@ -135,6 +140,7 @@ class StandardFeedbackObject:
     timestamp:  str = field(default_factory=lambda: _utc_now_iso())
     raw_meta:   dict = field(default_factory=dict)   # ← full original payload preserved
     labels:     list[str] = field(default_factory=list)
+    sentiment:  str = ""          # "negative" | "neutral" | "positive" (set by classify_feedback)
     arr:        float = 0.0
     plan_type:  str = ""
     jira_ticket: str = ""
@@ -147,17 +153,31 @@ def _stable_external_id(*parts: object) -> str:
     return hashlib.sha1(joined.encode("utf-8")).hexdigest()
 
 
+def _normalize_repo_full_name(value: str) -> str:
+    """Accept either "owner/repo" or a full GitHub URL (the dashboard's
+    workspace-settings field invites a URL) and return "owner/repo", the
+    shape github_app.py's API calls need.
+    """
+    value = value.strip().removesuffix(".git").removesuffix("/")
+    for prefix in ("https://github.com/", "http://github.com/", "github.com/"):
+        if value.startswith(prefix):
+            value = value[len(prefix) :]
+            break
+    return value
+
+
 class Normalizer:
     """Converts raw source payloads → StandardFeedbackObject."""
 
     @staticmethod
-    def from_zendesk(ticket: dict) -> StandardFeedbackObject:
+    def from_zendesk(ticket: dict, workspace_id: str | None = None) -> StandardFeedbackObject:
         # The Zendesk list API returns requester_id, not an inline requester
         # object; the full requester (with email) needs a side-load. We keep
         # both lookups so either shape works.
         requester = ticket.get("requester", {})
         email = requester.get("email", "") or ticket.get("requester_email", "")
         uid = requester.get("id", "") or ticket.get("requester_id", "")
+        kw = {"workspace_id": workspace_id} if workspace_id else {}
         return StandardFeedbackObject(
             text=ticket.get("description", "") or ticket.get("subject", ""),
             user_id=str(uid or ""),
@@ -166,13 +186,15 @@ class Normalizer:
             external_id=str(ticket.get("id", "")),
             timestamp=ticket.get("created_at", _utc_now_iso()),
             raw_meta=ticket,
+            **kw,
         )
 
     @staticmethod
-    def from_app_store(review: dict) -> StandardFeedbackObject:
+    def from_app_store(review: dict, workspace_id: str | None = None) -> StandardFeedbackObject:
         ext = review.get("review_id") or review.get("id") or _stable_external_id(
             review.get("userName"), review.get("date"), review.get("title")
         )
+        kw = {"workspace_id": workspace_id} if workspace_id else {}
         return StandardFeedbackObject(
             text=f"{review.get('title', '')} {review.get('content', '')}".strip(),
             user_id=str(review.get("userName", "")),
@@ -181,13 +203,15 @@ class Normalizer:
             external_id=str(ext),
             timestamp=review.get("date", _utc_now_iso()),
             raw_meta=review,
+            **kw,
         )
 
     @staticmethod
-    def from_play_store(review: dict) -> StandardFeedbackObject:
+    def from_play_store(review: dict, workspace_id: str | None = None) -> StandardFeedbackObject:
         ext = review.get("reviewId") or _stable_external_id(
             review.get("userName"), review.get("at"), review.get("content")
         )
+        kw = {"workspace_id": workspace_id} if workspace_id else {}
         return StandardFeedbackObject(
             text=review.get("content", ""),
             user_id=str(review.get("userName", "")),
@@ -196,11 +220,13 @@ class Normalizer:
             external_id=str(ext),
             timestamp=review.get("at", _utc_now_iso()),
             raw_meta=review,
+            **kw,
         )
 
     @staticmethod
-    def from_slack(event: dict) -> StandardFeedbackObject:
+    def from_slack(event: dict, workspace_id: str | None = None) -> StandardFeedbackObject:
         ts = event.get("ts", "")
+        kw = {"workspace_id": workspace_id} if workspace_id else {}
         return StandardFeedbackObject(
             text=event.get("text", ""),
             user_id=event.get("user", ""),
@@ -211,10 +237,11 @@ class Normalizer:
                 float(ts or time.time()), timezone.utc
             ).isoformat(),
             raw_meta=event,
+            **kw,
         )
 
     @staticmethod
-    def from_webhook(payload: dict) -> StandardFeedbackObject:
+    def from_webhook(payload: dict, workspace_id: str | None = None) -> StandardFeedbackObject:
         """Generic webhook — maps common field names automatically.
 
         Senders that want re-delivery to be idempotent should include an
@@ -227,6 +254,7 @@ class Normalizer:
             payload.get("feedback") or
             str(payload)
         )
+        kw = {"workspace_id": workspace_id} if workspace_id else {}
         return StandardFeedbackObject(
             text=text,
             user_id=str(payload.get("user_id", payload.get("userId", ""))),
@@ -235,13 +263,16 @@ class Normalizer:
             external_id=str(payload.get("id") or payload.get("external_id") or ""),
             timestamp=payload.get("timestamp", _utc_now_iso()),
             raw_meta=payload,
+            **kw,
         )
 
 
-def _feedback_exists(conn: sqlite3.Connection, source: str, external_id: str) -> str | None:
+def _feedback_exists(
+    conn: sqlite3.Connection, workspace_id: str, source: str, external_id: str
+) -> str | None:
     row = conn.execute(
-        "SELECT id FROM feedback WHERE source = ? AND external_id = ?",
-        (source, external_id),
+        "SELECT id FROM feedback WHERE workspace_id = ? AND source = ? AND external_id = ?",
+        (workspace_id, source, external_id),
     ).fetchone()
     return row["id"] if row else None
 
@@ -249,18 +280,18 @@ def _feedback_exists(conn: sqlite3.Connection, source: str, external_id: str) ->
 def save_feedback(fb: StandardFeedbackObject):
     """Persist a StandardFeedbackObject.
 
-    Idempotent when the source provided an external_id: a re-poll of the same
-    item is skipped before the (paid) embedding call.
+    Idempotent per-workspace when the source provided an external_id: a
+    re-poll of the same item is skipped before the (paid) embedding call.
     """
     external_id = fb.external_id or None
 
     with get_conn() as conn:
         if external_id is not None:
-            existing = _feedback_exists(conn, fb.source, external_id)
+            existing = _feedback_exists(conn, fb.workspace_id, fb.source, external_id)
             if existing:
                 log.info(
-                    "Skipping duplicate feedback [%s] external_id=%s (id=%s)",
-                    fb.source, external_id, existing,
+                    "Skipping duplicate feedback [%s/%s] external_id=%s (id=%s)",
+                    fb.workspace_id, fb.source, external_id, existing,
                 )
                 fb.id = existing
                 return fb
@@ -271,18 +302,19 @@ def save_feedback(fb: StandardFeedbackObject):
         cur = conn.execute(
             """
             INSERT INTO feedback
-              (id, text, user_id, user_email, source, external_id, timestamp,
-               raw_meta, labels, arr, plan_type, jira_ticket, jira_status,
-               embedding, embed_model)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-            ON CONFLICT(source, external_id) WHERE external_id IS NOT NULL
+              (id, workspace_id, text, user_id, user_email, source, external_id,
+               timestamp, raw_meta, labels, sentiment, arr, plan_type,
+               jira_ticket, jira_status, embedding, embed_model)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(workspace_id, source, external_id) WHERE external_id IS NOT NULL
             DO NOTHING
             """,
             (
-                fb.id, fb.text, fb.user_id, fb.user_email,
+                fb.id, fb.workspace_id, fb.text, fb.user_id, fb.user_email,
                 fb.source, external_id, fb.timestamp,
                 json.dumps(fb.raw_meta),
                 json.dumps(fb.labels),
+                fb.sentiment,
                 fb.arr, fb.plan_type,
                 fb.jira_ticket, fb.jira_status,
                 embedding.tobytes(), embedder.model_name,
@@ -292,11 +324,11 @@ def save_feedback(fb: StandardFeedbackObject):
             _replace_labels(conn, fb.id, fb.labels)
         else:  # lost a concurrent insert race; the winner owns the label rows
             log.info(
-                "Concurrent insert raced for %s external_id=%s; not re-labelling.",
-                fb.source, external_id,
+                "Concurrent insert raced for %s/%s external_id=%s; not re-labelling.",
+                fb.workspace_id, fb.source, external_id,
             )
 
-    log.info("Saved feedback [%s] id=%s", fb.source, fb.id)
+    log.info("Saved feedback [%s/%s] id=%s", fb.workspace_id, fb.source, fb.id)
     return fb
 
 
@@ -309,22 +341,24 @@ def _replace_labels(conn: sqlite3.Connection, feedback_id: str, labels: list[str
 
 
 # ---- Component A: Polling Services ----------------------------------------
+#
+# Each poll_* function is workspace-scoped: it takes that workspace's own
+# connector credentials (read from the dashboard's `hooks.config` via
+# supabase_sync, see poll_hook / the "poll_tick" job in worker.py) instead of
+# a single global env var. Each returns the number of items ingested.
 
-def poll_zendesk():
+
+def poll_zendesk(workspace_id: str, *, url: str, email: str, token: str) -> int:
     """Fetch Zendesk tickets created since the stored high-water mark."""
-    if not all([settings.zendesk_url, settings.zendesk_email, settings.zendesk_token]):
-        log.debug("Zendesk not configured, skipping poll.")
-        return
-    since = get_sync_cursor("zendesk") or (
+    if not all([url, email, token]):
+        log.debug("Zendesk not configured for workspace %s, skipping poll.", workspace_id)
+        return 0
+    since = get_sync_cursor("zendesk", workspace_id) or (
         datetime.now(timezone.utc) - timedelta(hours=1)
     ).strftime("%Y-%m-%dT%H:%M:%SZ")
-    url = f"{settings.zendesk_url}/api/v2/tickets.json?sort_by=created_at&sort_order=desc"
+    list_url = f"{url}/api/v2/tickets.json?sort_by=created_at&sort_order=desc"
     try:
-        resp = requests.get(
-            url,
-            auth=(f"{settings.zendesk_email}/token", settings.zendesk_token),
-            timeout=30,
-        )
+        resp = requests.get(list_url, auth=(f"{email}/token", token), timeout=30)
         resp.raise_for_status()
         tickets = resp.json().get("tickets", [])
         count = 0
@@ -332,66 +366,83 @@ def poll_zendesk():
         for t in tickets:
             created = t.get("created_at", "")
             if created > since:
-                enqueue_feedback(Normalizer.from_zendesk(t))
+                enqueue_feedback(Normalizer.from_zendesk(t, workspace_id))
                 count += 1
                 newest = max(newest, created)
         if newest != since:
-            set_sync_cursor("zendesk", newest)
-        log.info("Zendesk poll: ingested %d tickets.", count)
+            set_sync_cursor("zendesk", newest, workspace_id)
+        log.info("Zendesk poll [%s]: ingested %d tickets.", workspace_id, count)
+        return count
     except InsufficientCredits as exc:
         log.warning("Zendesk poll stopped: %s", exc)
+        return 0
     except Exception:
-        log.exception("Zendesk poll failed")
+        log.exception("Zendesk poll failed for workspace %s", workspace_id)
+        return 0
 
 
-def poll_app_store():
-    """Fetch recent iOS App Store reviews."""
-    if not settings.app_store_app_id:
-        return
+def poll_app_store(workspace_id: str, *, app_id: str, min_rating: int = 1) -> int:
+    """Fetch recent iOS App Store reviews for one workspace's app."""
+    if not app_id:
+        return 0
     try:
         from app_store_scraper import AppStore  # pip install app-store-scraper
-        app = AppStore(country="us", app_name="", app_id=settings.app_store_app_id)
+        app = AppStore(country="us", app_name="", app_id=app_id)
         app.review(how_many=50)
+        count = 0
         for review in app.reviews:
-            enqueue_feedback(Normalizer.from_app_store(review))
-        log.info(f"App Store poll: ingested {len(app.reviews)} reviews.")
+            if int(review.get("rating", 5) or 5) < min_rating:
+                continue
+            enqueue_feedback(Normalizer.from_app_store(review, workspace_id))
+            count += 1
+        log.info("App Store poll [%s]: ingested %d of %d reviews.", workspace_id, count, len(app.reviews))
+        return count
     except ImportError:
         log.warning("app-store-scraper not installed. Run: pip install app-store-scraper")
+        return 0
     except InsufficientCredits as exc:
         log.warning("App Store poll stopped: %s", exc)
+        return 0
     except Exception:
-        log.exception("App Store poll failed")
+        log.exception("App Store poll failed for workspace %s", workspace_id)
+        return 0
 
 
-def poll_play_store():
-    """Fetch recent Google Play reviews."""
-    if not settings.play_store_app_id:
-        return
+def poll_play_store(workspace_id: str, *, app_id: str, min_rating: int = 1) -> int:
+    """Fetch recent Google Play reviews for one workspace's app."""
+    if not app_id:
+        return 0
     try:
         from google_play_scraper import Sort, reviews  # pip install google-play-scraper
-        result, _ = reviews(
-            settings.play_store_app_id, lang="en", country="us", sort=Sort.NEWEST, count=50
-        )
+        result, _ = reviews(app_id, lang="en", country="us", sort=Sort.NEWEST, count=50)
+        count = 0
         for review in result:
-            enqueue_feedback(Normalizer.from_play_store(review))
-        log.info(f"Play Store poll: ingested {len(result)} reviews.")
+            if int(review.get("score", 5) or 5) < min_rating:
+                continue
+            enqueue_feedback(Normalizer.from_play_store(review, workspace_id))
+            count += 1
+        log.info("Play Store poll [%s]: ingested %d of %d reviews.", workspace_id, count, len(result))
+        return count
     except ImportError:
         log.warning("google-play-scraper not installed. Run: pip install google-play-scraper")
+        return 0
     except InsufficientCredits as exc:
         log.warning("Play Store poll stopped: %s", exc)
+        return 0
     except Exception:
-        log.exception("Play Store poll failed")
+        log.exception("Play Store poll failed for workspace %s", workspace_id)
+        return 0
 
 
-def poll_slack_channel(channel_id: str):
+def poll_slack_channel(workspace_id: str, *, bot_token: str, channel_id: str) -> int:
     """Fetch Slack messages newer than the stored high-water mark (per channel)."""
-    if not settings.slack_bot_token:
-        return
+    if not bot_token or not channel_id:
+        return 0
     state_key = f"slack:{channel_id}"
-    oldest = get_sync_cursor(state_key) or str(time.time() - 3600)
+    oldest = get_sync_cursor(state_key, workspace_id) or str(time.time() - 3600)
     try:
         from slack_sdk import WebClient  # pip install slack_sdk
-        client = WebClient(token=settings.slack_bot_token)
+        client = WebClient(token=bot_token)
         result = client.conversations_history(channel=channel_id, oldest=oldest)
         messages = result.get("messages", [])
         newest = oldest
@@ -399,18 +450,83 @@ def poll_slack_channel(channel_id: str):
         for msg in messages:
             if msg.get("subtype"):        # skip bot/system messages
                 continue
-            enqueue_feedback(Normalizer.from_slack(msg))
+            enqueue_feedback(Normalizer.from_slack(msg, workspace_id))
             ingested += 1
             newest = max(newest, msg.get("ts", oldest))
         if newest != oldest:
-            set_sync_cursor(state_key, newest)
-        log.info("Slack poll [%s]: ingested %d messages.", channel_id, ingested)
+            set_sync_cursor(state_key, newest, workspace_id)
+        log.info("Slack poll [%s/%s]: ingested %d messages.", workspace_id, channel_id, ingested)
+        return ingested
     except ImportError:
         log.warning("slack_sdk not installed. Run: pip install slack_sdk")
+        return 0
     except InsufficientCredits as exc:
         log.warning("Slack poll stopped: %s", exc)
+        return 0
     except Exception:
-        log.exception("Slack poll failed")
+        log.exception("Slack poll failed for workspace %s", workspace_id)
+        return 0
+
+
+# Star-rating filter understands the dashboard's sync_settings.min_star_rating
+# strings ("2★ and above" etc); anything unparsed falls back to "no filter".
+def _parse_min_star_rating(label: str | None) -> int:
+    if not label:
+        return 1
+    match = re.search(r"(\d)", label)
+    return int(match.group(1)) if match else 1
+
+
+# Interval (seconds) for a poll_tick to re-enqueue itself, parsed from the
+# dashboard's sync_settings.sync_frequency string ("Every 15 minutes", "Every
+# hour", "Every 6 hours", "Daily", ...). Unparsed -> hourly.
+def _parse_sync_frequency(label: str | None) -> float:
+    if not label:
+        return 3600.0
+    lowered = label.lower()
+    if "daily" in lowered or "day" in lowered:
+        return 86400.0
+    match = re.search(r"(\d+)\s*min", lowered)
+    if match:
+        return float(match.group(1)) * 60.0
+    match = re.search(r"(\d+)\s*hour", lowered)
+    if match:
+        return float(match.group(1)) * 3600.0
+    if "hour" in lowered:
+        return 3600.0
+    return 3600.0
+
+
+def poll_hook(hook: dict) -> int:
+    """Dispatch a single connected `hooks` row (from Supabase) to its poller.
+
+    ``hook`` has the shape returned by supabase_sync.list_connected_hooks():
+    {id, workspace_id, type, config}. Returns the number of items ingested.
+    """
+    workspace_id = hook["workspace_id"]
+    config = hook.get("config") or {}
+    hook_type = hook.get("type")
+    min_rating = _parse_min_star_rating(config.get("min_star_rating"))
+
+    if hook_type == "zendesk":
+        return poll_zendesk(
+            workspace_id,
+            url=config.get("url", ""),
+            email=config.get("email", ""),
+            token=config.get("token", ""),
+        )
+    if hook_type == "appstore":
+        return poll_app_store(workspace_id, app_id=config.get("app_id", ""), min_rating=min_rating)
+    if hook_type == "playstore":
+        return poll_play_store(workspace_id, app_id=config.get("app_id", ""), min_rating=min_rating)
+    if hook_type == "slack":
+        return poll_slack_channel(
+            workspace_id,
+            bot_token=config.get("bot_token", ""),
+            channel_id=config.get("channel_id", ""),
+        )
+    log.debug("poll_hook: no poller for hook type %r (workspace %s)", hook_type, workspace_id)
+    return 0
 
 
 # =============================================================================
@@ -493,11 +609,12 @@ def normalize_taxonomy_nodes(data: dict):
 
 # ---- Component A: Bootstrapper --------------------------------------------
 
-def bootstrap_taxonomy_from_url(url: str):
+def bootstrap_taxonomy_from_url(url: str, workspace_id: str | None = None):
     """
     Scrape a public URL (help docs / pricing page) and ask the LLM to build
     a 3-level taxonomy. Stores results in the taxonomy table.
     """
+    workspace_id = workspace_id or settings.default_workspace_id
     if not is_safe_public_url(url):
         log.error("Refusing to fetch taxonomy source %r: not a public http(s) URL.", url)
         return
@@ -548,11 +665,12 @@ Product text:
             return
 
         with get_conn() as conn:
-            conn.execute("DELETE FROM taxonomy")  # reset on re-bootstrap
+            conn.execute("DELETE FROM taxonomy WHERE workspace_id = ?", (workspace_id,))
             for node in nodes:
                 conn.execute(
-                    "INSERT INTO taxonomy (id, level1, level2, level3, description) VALUES (?,?,?,?,?)",
-                    (str(uuid.uuid4()), node.get("level1"), node.get("level2"),
+                    "INSERT INTO taxonomy (id, workspace_id, level1, level2, level3, description) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (str(uuid.uuid4()), workspace_id, node.get("level1"), node.get("level2"),
                      node.get("level3"), node.get("description")),
                 )
         log.info(f"Taxonomy bootstrapped with {len(nodes)} nodes.")
@@ -560,10 +678,13 @@ Product text:
         log.exception("Taxonomy parse failed. Raw response: %s", response)
 
 
-def get_taxonomy_labels() -> list[str]:
+def get_taxonomy_labels(workspace_id: str | None = None) -> list[str]:
     """Return flat list of 'Level1 > Level2 > Level3' strings for classification."""
+    workspace_id = workspace_id or settings.default_workspace_id
     with get_conn() as conn:
-        rows = conn.execute("SELECT level1, level2, level3 FROM taxonomy").fetchall()
+        rows = conn.execute(
+            "SELECT level1, level2, level3 FROM taxonomy WHERE workspace_id = ?", (workspace_id,)
+        ).fetchall()
     labels = []
     for r in rows:
         parts = [r["level1"], r["level2"], r["level3"]]
@@ -571,14 +692,20 @@ def get_taxonomy_labels() -> list[str]:
     return labels or ["General > Feedback > Uncategorized"]
 
 
-# ---- Component B: Classifier (Multi-label) --------------------------------
+# ---- Component B: Classifier (Multi-label + sentiment) --------------------
 
-def classify_feedback(fb: StandardFeedbackObject) -> list[str]:
+_VALID_SENTIMENTS = {"negative", "neutral", "positive"}
+
+
+def classify_feedback(fb: StandardFeedbackObject) -> tuple[list[str], str]:
     """
-    Multi-label classification: one review can map to MULTIPLE taxonomy nodes.
+    Multi-label classification + sentiment, in a single LLM call.
     e.g. "Login failed and support was rude" → [Authentication > Login, Support > Quality]
+
+    Sentiment drives bucket eligibility (see rebuild_buckets): only "negative"
+    feedback is clustered into a suggested fix. Every item is still saved.
     """
-    labels = get_taxonomy_labels()
+    labels = get_taxonomy_labels(fb.workspace_id)
     labels_text = "\n".join(f"- {l}" for l in labels)
 
     prompt = f"""
@@ -591,32 +718,36 @@ Feedback text:
 "{fb.text}"
 
 Rules:
-- Return ONLY valid JSON: {{"labels": ["Label A", "Label B"]}}
+- Return ONLY valid JSON: {{"labels": ["Label A", "Label B"], "sentiment": "negative"|"neutral"|"positive"}}
 - A single review can have MULTIPLE labels (multi-label classification).
-- If nothing fits, use: {{"labels": ["General > Feedback > Uncategorized"]}}
+- If nothing fits, use: {{"labels": ["General > Feedback > Uncategorized"], "sentiment": "neutral"}}
+- "sentiment" reflects whether the user is complaining/frustrated (negative), merely
+  informational (neutral), or praising/satisfied (positive).
 - No explanation, just JSON.
 """
     response = call_llm(prompt, expect_json=True)
     try:
         data = extract_json_from_llm(response)
-
         if not data:
-            return ["General > Feedback > Uncategorized"]
+            return ["General > Feedback > Uncategorized"], "neutral"
 
         labels = data.get("labels")
-
         if not isinstance(labels, list) or not labels:
-            return ["General > Feedback > Uncategorized"]
+            labels = ["General > Feedback > Uncategorized"]
 
-        return labels
+        sentiment = str(data.get("sentiment") or "neutral").lower()
+        if sentiment not in _VALID_SENTIMENTS:
+            sentiment = "neutral"
+
+        return labels, sentiment
 
     except Exception:
-        return ["General > Feedback > Uncategorized"]
+        return ["General > Feedback > Uncategorized"], "neutral"
 
 
 # ---- Component C: Drift Detector ------------------------------------------
 
-def detect_taxonomy_drift():
+def detect_taxonomy_drift(workspace_id: str | None = None):
     """
     Weekly: cluster 'Unclassified' feedback using HDBSCAN to find emerging topics.
     Suggests new taxonomy nodes to add.
@@ -627,7 +758,8 @@ def detect_taxonomy_drift():
         log.warning("hdbscan not installed. Run: pip install hdbscan")
         return
 
-    log.info("Running taxonomy drift detection...")
+    workspace_id = workspace_id or settings.default_workspace_id
+    log.info("Running taxonomy drift detection for workspace %s...", workspace_id)
     model_name = EmbeddingEngine.get().model_name
     with get_conn() as conn:
         rows = conn.execute(
@@ -635,9 +767,10 @@ def detect_taxonomy_drift():
             SELECT f.id AS id, f.text AS text, f.embedding AS embedding
             FROM feedback f
             JOIN feedback_labels fl ON fl.feedback_id = f.id
-            WHERE fl.label = ? AND f.embedding IS NOT NULL AND f.embed_model = ?
+            WHERE f.workspace_id = ? AND fl.label = ?
+              AND f.embedding IS NOT NULL AND f.embed_model = ?
             """,
-            (UNCATEGORIZED_LABEL, model_name),
+            (workspace_id, UNCATEGORIZED_LABEL, model_name),
         ).fetchall()
 
     if len(rows) < 10:
@@ -702,7 +835,8 @@ def resolve_user_revenue(fb: StandardFeedbackObject) -> StandardFeedbackObject:
         return fb
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT arr, plan_type FROM users WHERE email = ?", (fb.user_email,)
+            "SELECT arr, plan_type FROM users WHERE workspace_id = ? AND email = ?",
+            (fb.workspace_id, fb.user_email),
         ).fetchone()
     if row:
         fb.arr = row["arr"] or 0.0
@@ -710,7 +844,7 @@ def resolve_user_revenue(fb: StandardFeedbackObject) -> StandardFeedbackObject:
     return fb
 
 
-def import_users_from_csv_text(csv_text: str) -> int:
+def import_users_from_csv_text(csv_text: str, workspace_id: str | None = None) -> int:
     """
     Bulk-import users from CSV text with columns:
     email, user_id, arr, plan_type, company.
@@ -720,6 +854,7 @@ def import_users_from_csv_text(csv_text: str) -> int:
     import csv
     import io
 
+    workspace_id = workspace_id or settings.default_workspace_id
     count = 0
     reader = csv.DictReader(io.StringIO(csv_text))
     with get_conn() as conn:
@@ -730,9 +865,10 @@ def import_users_from_csv_text(csv_text: str) -> int:
                 arr = 0.0
             conn.execute(
                 "INSERT OR REPLACE INTO users "
-                "(email, user_id, arr, plan_type, company) VALUES (?,?,?,?,?)",
+                "(email, workspace_id, user_id, arr, plan_type, company) VALUES (?,?,?,?,?,?)",
                 (
                     row.get("email", ""),
+                    workspace_id,
                     row.get("user_id", ""),
                     arr,
                     row.get("plan_type", ""),
@@ -740,18 +876,20 @@ def import_users_from_csv_text(csv_text: str) -> int:
                 ),
             )
             count += 1
-    log.info("Imported %d users from uploaded CSV.", count)
+    log.info("Imported %d users into workspace %s from uploaded CSV.", count, workspace_id)
     return count
 
 
 # ---- Component B: CRM Sync (HubSpot free tier) ----------------------------
 
-def sync_hubspot_contacts():
+def sync_hubspot_contacts(workspace_id: str | None = None):
     """
     Sync HubSpot contacts (free tier) → populate users table with ARR / plan type.
     Uses HubSpot's free public API (no paid plan required for basic contact properties).
-    Set env: HUBSPOT_API_KEY
+    Set env: HUBSPOT_API_KEY. Global (admin's own workspace) — no per-customer
+    HubSpot connection UI exists yet.
     """
+    workspace_id = workspace_id or settings.default_workspace_id
     api_key = settings.hubspot_api_key
     if not api_key:
         log.debug("HubSpot not configured, skipping CRM sync.")
@@ -777,8 +915,9 @@ def sync_hubspot_contacts():
                 plan = props.get("jobtitle", "")
                 company = props.get("company", "")
                 conn.execute(
-                    "INSERT OR REPLACE INTO users (email, arr, plan_type, company) VALUES (?,?,?,?)",
-                    (email, arr, plan, company),
+                    "INSERT OR REPLACE INTO users (email, workspace_id, arr, plan_type, company) "
+                    "VALUES (?,?,?,?,?)",
+                    (email, workspace_id, arr, plan, company),
                 )
         log.info(f"HubSpot sync: updated {len(contacts)} contacts.")
     except Exception:
@@ -790,13 +929,14 @@ def sync_hubspot_contacts():
 UNCATEGORIZED_LABEL = "General > Feedback > Uncategorized"
 
 
-def get_revenue_impact_report(top_n: int = 20) -> list[dict]:
+def get_revenue_impact_report(top_n: int = 20, workspace_id: str | None = None) -> list[dict]:
     """
     Rank taxonomy labels by Issue_Score = COUNT(distinct users) * SUM(user ARR).
 
     Aggregates over the normalised feedback_labels table, so a multi-label
     review contributes to every label it carries.
     """
+    workspace_id = workspace_id or settings.default_workspace_id
     with get_conn() as conn:
         rows = conn.execute(
             """
@@ -807,12 +947,12 @@ def get_revenue_impact_report(top_n: int = 20) -> list[dict]:
                 COUNT(*)                      AS feedback_count
             FROM feedback_labels fl
             JOIN feedback f ON f.id = fl.feedback_id
-            WHERE fl.label != ?
+            WHERE f.workspace_id = ? AND fl.label != ?
             GROUP BY fl.label
             ORDER BY (COUNT(DISTINCT f.user_email) * COALESCE(SUM(f.arr), 0)) DESC
             LIMIT ?
             """,
-            (UNCATEGORIZED_LABEL, top_n),
+            (workspace_id, UNCATEGORIZED_LABEL, top_n),
         ).fetchall()
 
     report = []
@@ -847,19 +987,20 @@ class VectorStore:
         self.ticket_keys: list[str] = []   # parallel list: index position → jira key
         self._lock = threading.Lock()
 
-    def rebuild_from_db(self):
-        """Load Jira ticket embeddings from SQLite into FAISS.
+    def rebuild_from_db(self, workspace_id: str | None = None):
+        """Load one workspace's Jira ticket embeddings from SQLite into FAISS.
 
         Only vectors produced by the *current* embedding model are indexed;
         rows left over from a previous provider/model are skipped so their
         (differently shaped) vectors cannot corrupt the index.
         """
+        workspace_id = workspace_id or settings.default_workspace_id
         model_name = EmbeddingEngine.get().model_name
         with get_conn() as conn:
             rows = conn.execute(
                 "SELECT key, embedding FROM jira_tickets "
-                "WHERE embedding IS NOT NULL AND embed_model = ?",
-                (model_name,),
+                "WHERE workspace_id = ? AND embedding IS NOT NULL AND embed_model = ?",
+                (workspace_id, model_name),
             ).fetchall()
 
         if not rows:
@@ -899,20 +1040,35 @@ class VectorStore:
         return results
 
 
-VECTOR_STORE = VectorStore()
+_VECTOR_STORES: dict[str, VectorStore] = {}
+
+
+def get_vector_store(workspace_id: str | None = None) -> VectorStore:
+    """Return (lazily creating) the per-workspace in-process FAISS index."""
+    workspace_id = workspace_id or settings.default_workspace_id
+    store = _VECTOR_STORES.get(workspace_id)
+    if store is None:
+        store = VectorStore()
+        _VECTOR_STORES[workspace_id] = store
+    return store
+
+
+VECTOR_STORE = get_vector_store()  # back-compat alias: the default workspace's store
 
 
 # ---- Component A: Jira / Linear Sync -------------------------------------
 
-def sync_jira_tickets():
+def sync_jira_tickets(workspace_id: str | None = None):
     """
     Fetch In Progress + Backlog tickets from Jira, embed them, store in SQLite.
-    Linear users: swap for Linear GraphQL API (also free).
+    Linear users: swap for Linear GraphQL API (also free). Global (admin's own
+    workspace) — no per-customer Jira connection UI exists yet.
     """
+    workspace_id = workspace_id or settings.default_workspace_id
     if not all([settings.jira_url, settings.jira_email, settings.jira_token]):
         if settings.load_demo_data:
             log.info("Jira not configured — loading demo tickets (PRODRION_LOAD_DEMO_DATA=true).")
-            _load_demo_tickets()
+            _load_demo_tickets(workspace_id)
         else:
             log.info("Jira not configured — skipping ticket sync.")
         return
@@ -931,14 +1087,15 @@ def sync_jira_tickets():
         )
         resp.raise_for_status()
         issues = resp.json().get("issues", [])
-        _upsert_tickets(issues)
-        VECTOR_STORE.rebuild_from_db()
+        _upsert_tickets(issues, workspace_id)
+        get_vector_store(workspace_id).rebuild_from_db(workspace_id)
         log.info(f"Jira sync: indexed {len(issues)} tickets.")
     except Exception:
         log.exception("Jira sync failed")
 
 
-def _upsert_tickets(issues: list[dict]):
+def _upsert_tickets(issues: list[dict], workspace_id: str | None = None):
+    workspace_id = workspace_id or settings.default_workspace_id
     embedder = EmbeddingEngine.get()
     with get_conn() as conn:
         for issue in issues:
@@ -950,7 +1107,8 @@ def _upsert_tickets(issues: list[dict]):
             status = fields.get("status", {}).get("name", "")
 
             existing = conn.execute(
-                "SELECT summary, embed_model FROM jira_tickets WHERE key = ?", (key,)
+                "SELECT summary, embed_model FROM jira_tickets WHERE workspace_id = ? AND key = ?",
+                (workspace_id, key),
             ).fetchone()
             # Re-embed only when the text or the embedding model changed.
             if existing and existing["summary"] == summary and (
@@ -958,8 +1116,8 @@ def _upsert_tickets(issues: list[dict]):
             ):
                 conn.execute(
                     "UPDATE jira_tickets SET status = ?, updated_at = datetime('now') "
-                    "WHERE key = ?",
-                    (status, key),
+                    "WHERE workspace_id = ? AND key = ?",
+                    (status, workspace_id, key),
                 )
                 continue
 
@@ -967,9 +1125,9 @@ def _upsert_tickets(issues: list[dict]):
             conn.execute(
                 """
                 INSERT INTO jira_tickets
-                  (id, key, summary, status, embedding, embed_model, updated_at)
-                VALUES (?,?,?,?,?,?,datetime('now'))
-                ON CONFLICT(key) DO UPDATE SET
+                  (id, workspace_id, key, summary, status, embedding, embed_model, updated_at)
+                VALUES (?,?,?,?,?,?,?,datetime('now'))
+                ON CONFLICT(workspace_id, key) DO UPDATE SET
                   summary = excluded.summary,
                   status = excluded.status,
                   embedding = excluded.embedding,
@@ -977,22 +1135,23 @@ def _upsert_tickets(issues: list[dict]):
                   updated_at = datetime('now')
                 """,
                 (
-                    str(uuid.uuid4()), key, summary, status,
+                    str(uuid.uuid4()), workspace_id, key, summary, status,
                     embedding.tobytes(), embedder.model_name,
                 ),
             )
 
 
-def _load_demo_tickets():
+def _load_demo_tickets(workspace_id: str | None = None):
     """Load a few demo tickets so the system works without Jira credentials."""
+    workspace_id = workspace_id or settings.default_workspace_id
     demo = [
         {"key": "PROJ-101", "fields": {"summary": "Fix SSO timeout on login", "status": {"name": "In Progress"}}},
         {"key": "PROJ-102", "fields": {"summary": "Export to CSV broken for large datasets", "status": {"name": "Backlog"}}},
         {"key": "PROJ-103", "fields": {"summary": "Mobile app crashes on startup", "status": {"name": "Backlog"}}},
         {"key": "PROJ-104", "fields": {"summary": "Support for multi-factor authentication", "status": {"name": "In Progress"}}},
     ]
-    _upsert_tickets(demo)
-    VECTOR_STORE.rebuild_from_db()
+    _upsert_tickets(demo, workspace_id)
+    get_vector_store(workspace_id).rebuild_from_db(workspace_id)
     log.info("Loaded demo Jira tickets.")
 
 
@@ -1005,12 +1164,13 @@ def match_to_jira(fb: StandardFeedbackObject) -> StandardFeedbackObject:
     if not fb.text:
         return fb
     vec = EmbeddingEngine.get().encode_one(fb.text)
-    matches = VECTOR_STORE.search(vec, k=3)
+    matches = get_vector_store(fb.workspace_id).search(vec, k=3)
     for jira_key, score in matches:
         if score >= settings.similarity_threshold:
             with get_conn() as conn:
                 row = conn.execute(
-                    "SELECT status FROM jira_tickets WHERE key=?", (jira_key,)
+                    "SELECT status FROM jira_tickets WHERE workspace_id=? AND key=?",
+                    (fb.workspace_id, jira_key),
                 ).fetchone()
             fb.jira_ticket = jira_key
             fb.jira_status = row["status"] if row else "Unknown"
@@ -1042,12 +1202,44 @@ def send_slack_alert(message: str):
 
 # ---- Component A: Text-to-SQL Query Interface ----------------------------
 
-def _open_readonly_conn() -> sqlite3.Connection:
-    """A read-only SQLite connection for untrusted (LLM-generated) queries."""
+_WORKSPACE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _open_readonly_conn(workspace_id: str) -> sqlite3.Connection:
+    """A read-only SQLite connection for untrusted (LLM-generated) queries,
+    scoped to one workspace via temp views that shadow the real tables.
+
+    workspace_id is validated (not attacker-supplied free text — it comes
+    from the resolved caller/admin, never from the LLM) before being
+    interpolated into the view definitions, since SQLite does not support
+    bound parameters inside CREATE VIEW.
+    """
+    if not _WORKSPACE_ID_RE.match(workspace_id):
+        raise ValueError(f"invalid workspace_id: {workspace_id!r}")
     conn = sqlite3.connect(
         f"file:{settings.db_path}?mode=ro", uri=True, check_same_thread=False
     )
     conn.row_factory = sqlite3.Row
+    # Temp objects live outside the read-only-opened main db file, so these
+    # succeed even though PRAGMA query_only (set below) then locks it down.
+    conn.execute(
+        f"CREATE TEMP VIEW feedback AS SELECT * FROM main.feedback "
+        f"WHERE workspace_id = '{workspace_id}'"
+    )
+    conn.execute(
+        "CREATE TEMP VIEW feedback_labels AS "
+        "SELECT fl.* FROM main.feedback_labels fl "
+        "JOIN main.feedback f ON f.id = fl.feedback_id "
+        f"WHERE f.workspace_id = '{workspace_id}'"
+    )
+    conn.execute(
+        f"CREATE TEMP VIEW taxonomy AS SELECT * FROM main.taxonomy "
+        f"WHERE workspace_id = '{workspace_id}'"
+    )
+    conn.execute(
+        f"CREATE TEMP VIEW users AS SELECT * FROM main.users "
+        f"WHERE workspace_id = '{workspace_id}'"
+    )
     conn.execute("PRAGMA query_only = ON")
     return conn
 
@@ -1056,14 +1248,15 @@ def _open_readonly_conn() -> sqlite3.Connection:
 _SQL_DENYLIST = ("attach", "pragma", "sqlite_", "load_extension", "--", "/*")
 
 
-def chat_with_data(natural_language_query: str) -> dict:
+def chat_with_data(natural_language_query: str, workspace_id: str | None = None) -> dict:
     """
     Convert a natural-language question into a single read-only SQL SELECT,
-    run it against a read-only connection with a hard row cap and wall-clock
-    budget, and return the rows.
+    run it against a read-only connection scoped to one workspace with a hard
+    row cap and wall-clock budget, and return the rows.
 
     Defence in depth only — this endpoint is also behind bearer auth.
     """
+    workspace_id = workspace_id or settings.default_workspace_id
     schema_hint = """
 Table: feedback
   id, text, user_id, user_email, source, external_id, timestamp,
@@ -1110,7 +1303,7 @@ Rules:
     # Enforce a hard row cap regardless of any LIMIT the model wrote.
     capped_sql = f"SELECT * FROM (\n{sql}\n) LIMIT {settings.query_row_cap}"
 
-    conn = _open_readonly_conn()
+    conn = _open_readonly_conn(workspace_id)
     deadline = time.monotonic() + settings.query_timeout_seconds
     conn.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0, 10_000)
     try:
@@ -1126,12 +1319,13 @@ Rules:
 
 # ---- Component B: Trend / Velocity Watcher --------------------------------
 
-def check_velocity_spikes():
+def check_velocity_spikes(workspace_id: str | None = None):
     """
     Compares this week's volume vs last week's per taxonomy label.
     Fires a Slack alert if volume doubles or more.
     """
-    log.info("Checking velocity spikes...")
+    workspace_id = workspace_id or settings.default_workspace_id
+    log.info("Checking velocity spikes for workspace %s...", workspace_id)
     now = datetime.now(timezone.utc)
     week_ago  = (now - timedelta(days=7)).isoformat()
     two_weeks = (now - timedelta(days=14)).isoformat()
@@ -1143,10 +1337,10 @@ def check_velocity_spikes():
                 SELECT fl.label AS label, COUNT(*) AS cnt
                 FROM feedback_labels fl
                 JOIN feedback f ON f.id = fl.feedback_id
-                WHERE f.timestamp >= ?
+                WHERE f.workspace_id = ? AND f.timestamp >= ?
                 GROUP BY fl.label
                 """,
-                (start,),
+                (workspace_id, start),
             ).fetchall()
         else:
             rows = conn.execute(
@@ -1154,10 +1348,10 @@ def check_velocity_spikes():
                 SELECT fl.label AS label, COUNT(*) AS cnt
                 FROM feedback_labels fl
                 JOIN feedback f ON f.id = fl.feedback_id
-                WHERE f.timestamp >= ? AND f.timestamp < ?
+                WHERE f.workspace_id = ? AND f.timestamp >= ? AND f.timestamp < ?
                 GROUP BY fl.label
                 """,
-                (start, end),
+                (workspace_id, start, end),
             ).fetchall()
         return {r["label"]: r["cnt"] for r in rows}
 
@@ -1180,21 +1374,23 @@ def check_velocity_spikes():
             log.warning(msg)
             send_slack_alert(msg)
 
-def taxonomy_exists() -> bool:
+def taxonomy_exists(workspace_id: str | None = None) -> bool:
+    workspace_id = workspace_id or settings.default_workspace_id
     with get_conn() as conn:
         count = conn.execute(
-            "SELECT COUNT(*) FROM taxonomy"
+            "SELECT COUNT(*) FROM taxonomy WHERE workspace_id = ?", (workspace_id,)
         ).fetchone()[0]
     return count > 0
 
 
-def auto_bootstrap_taxonomy_if_needed(source: str):
+def auto_bootstrap_taxonomy_if_needed(source: str, workspace_id: str | None = None):
     """
     Build the taxonomy once, from the configured product docs URL, when the
     taxonomy table is empty. Does nothing if PRODRION_TAXONOMY_BOOTSTRAP_URL
     is not set.
     """
-    if taxonomy_exists():
+    workspace_id = workspace_id or settings.default_workspace_id
+    if taxonomy_exists(workspace_id):
         return
 
     if not settings.taxonomy_bootstrap_url:
@@ -1206,7 +1402,7 @@ def auto_bootstrap_taxonomy_if_needed(source: str):
         return
 
     log.info("Taxonomy empty → auto-bootstrapping from %s", settings.taxonomy_bootstrap_url)
-    bootstrap_taxonomy_from_url(settings.taxonomy_bootstrap_url)
+    bootstrap_taxonomy_from_url(settings.taxonomy_bootstrap_url, workspace_id)
 
 # =============================================================================
 # THE PIPELINE: Wire all engines together
@@ -1222,22 +1418,25 @@ def pipeline(fb: StandardFeedbackObject) -> StandardFeedbackObject:
 
     Runs in the background worker (see worker.py), not in the request handler.
     """
-    auto_bootstrap_taxonomy_if_needed(fb.source)
+    auto_bootstrap_taxonomy_if_needed(fb.source, fb.workspace_id)
     fb = resolve_user_revenue(fb)
-    fb.labels = classify_feedback(fb)
+    fb.labels, fb.sentiment = classify_feedback(fb)
     fb = match_to_jira(fb)
     save_feedback(fb)
     return fb
 
 
-def enqueue_feedback(fb: StandardFeedbackObject, workspace_id: str | None = None) -> str:
+def enqueue_feedback(fb: StandardFeedbackObject) -> str:
     """Charge credits and queue a feedback item; returns the job id.
+
+    The workspace charged is always ``fb.workspace_id`` — the single source
+    of truth for which workspace this item belongs to (set by the Normalizer
+    or the dataclass default), so billing and storage can never diverge.
 
     Raises credits.InsufficientCredits when the workspace is out of credits.
     """
-    workspace_id = workspace_id or settings.default_workspace_id
     credits.charge(
-        workspace_id, settings.credits_per_feedback, "ingest_feedback", ref=fb.id
+        fb.workspace_id, settings.credits_per_feedback, "ingest_feedback", ref=fb.id
     )
     return jobs.enqueue("process_feedback", asdict(fb))
 
@@ -1262,6 +1461,130 @@ def enqueue_repo_analysis(
             "goal": goal,
         },
     )
+
+
+# =============================================================================
+# ENGINE 6: BUCKET BUILDER  (negative feedback -> suggested fix)
+# =============================================================================
+#
+# Only "negative" feedback (set by classify_feedback) is eligible — this is
+# the product's own described sentiment-filtering step, now folded into the
+# classifier instead of living in the disconnected reviewer.py script.
+# Clustering is automatic (one bucket per taxonomy label); turning a bucket
+# into a GitHub issue stays a user-triggered action (see POST /me/repo-analysis)
+# since there is no real billing gate yet to bound autonomous credit spend.
+
+def _bucket_impact_level(arr_impacted: float) -> str:
+    if arr_impacted >= 10_000:
+        return "high"
+    if arr_impacted >= 1_000:
+        return "medium"
+    return "low"
+
+
+def _upsert_bucket(
+    workspace_id: str, label: str, feedback_count: int, arr_impacted: float
+) -> str:
+    goal = f"Address the recurring complaint: {label}"
+    with get_conn() as conn:
+        existing = conn.execute(
+            "SELECT id FROM buckets WHERE workspace_id = ? AND label = ?",
+            (workspace_id, label),
+        ).fetchone()
+        if existing:
+            bucket_id = existing["id"]
+            conn.execute(
+                "UPDATE buckets SET feedback_count = ?, arr_impacted = ?, "
+                "suggested_goal = ?, updated_at = datetime('now') WHERE id = ?",
+                (feedback_count, arr_impacted, goal, bucket_id),
+            )
+        else:
+            bucket_id = str(uuid.uuid4())
+            conn.execute(
+                "INSERT INTO buckets "
+                "(id, workspace_id, label, feedback_count, arr_impacted, suggested_goal) "
+                "VALUES (?,?,?,?,?,?)",
+                (bucket_id, workspace_id, label, feedback_count, arr_impacted, goal),
+            )
+    return bucket_id
+
+
+def get_bucket(workspace_id: str, bucket_id: str) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM buckets WHERE workspace_id = ? AND id = ?",
+            (workspace_id, bucket_id),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_bucket_by_label(workspace_id: str, label: str) -> dict | None:
+    """Look up a bucket by its taxonomy label — the dashboard's
+    `suggested_features.title` is exactly this label (see rebuild_buckets),
+    so the browser never needs to know the backend's internal bucket id.
+    """
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM buckets WHERE workspace_id = ? AND label = ?",
+            (workspace_id, label),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def set_bucket_status(workspace_id: str, bucket_id: str, status: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE buckets SET status = ?, updated_at = datetime('now') "
+            "WHERE workspace_id = ? AND id = ?",
+            (status, workspace_id, bucket_id),
+        )
+
+
+def rebuild_buckets(workspace_id: str | None = None) -> list[dict]:
+    """Group unresolved negative feedback by label into buckets, and push any
+    bucket at/above settings.goal_min_cluster_size to the dashboard as a
+    suggested feature. Returns the buckets touched.
+    """
+    workspace_id = workspace_id or settings.default_workspace_id
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT fl.label AS label, COUNT(*) AS cnt, COALESCE(SUM(f.arr), 0) AS arr_sum
+            FROM feedback_labels fl
+            JOIN feedback f ON f.id = fl.feedback_id
+            WHERE f.workspace_id = ? AND f.sentiment = 'negative' AND fl.label != ?
+            GROUP BY fl.label
+            """,
+            (workspace_id, UNCATEGORIZED_LABEL),
+        ).fetchall()
+
+    touched = []
+    for row in rows:
+        label, count, arr_sum = row["label"], row["cnt"], row["arr_sum"]
+        if count < settings.goal_min_cluster_size:
+            continue
+        bucket_id = _upsert_bucket(workspace_id, label, count, arr_sum)
+        touched.append(
+            {"id": bucket_id, "label": label, "feedback_count": count, "arr_impacted": arr_sum}
+        )
+        try:
+            supabase_sync.upsert_suggested_feature(
+                workspace_id,
+                key=label,
+                title=label,
+                description=(
+                    f"{count} negative reports"
+                    + (f" — ${arr_sum:,.0f} ARR affected" if arr_sum else "")
+                ),
+                confidence=min(99, 50 + count * 5),
+                impact_level=_bucket_impact_level(arr_sum),
+                sources_count=count,
+            )
+        except Exception:
+            log.exception("Failed to sync bucket %r to the dashboard (workspace %s)", label, workspace_id)
+    if touched:
+        log.info("rebuild_buckets[%s]: %d bucket(s) at/above threshold.", workspace_id, len(touched))
+    return touched
 
 
 # =============================================================================
@@ -1347,35 +1670,36 @@ async def webhook_slack(request: Request):
 
 
 @app.get("/query", dependencies=_ADMIN)
-async def query_data(q: str):
+async def query_data(q: str, workspace_id: str | None = None):
     """Natural language query interface. e.g. ?q=Show me all login issues from Enterprise users"""
-    return chat_with_data(q)
+    return chat_with_data(q, workspace_id)
 
 
 @app.get("/revenue-impact", dependencies=_ADMIN)
-async def revenue_impact(top_n: int = 20):
+async def revenue_impact(top_n: int = 20, workspace_id: str | None = None):
     """Returns issues ranked by revenue impact (COUNT * ARR)."""
-    return {"report": get_revenue_impact_report(top_n)}
+    return {"report": get_revenue_impact_report(top_n, workspace_id)}
 
 
 @app.post("/bootstrap-taxonomy", dependencies=_ADMIN)
-async def bootstrap_taxonomy(url: str):
+async def bootstrap_taxonomy(url: str, workspace_id: str | None = None):
     """Scrape a URL and auto-generate the product taxonomy."""
     if not is_safe_public_url(url):
         raise HTTPException(status_code=400, detail="url must be a public http(s) URL")
-    bootstrap_taxonomy_from_url(url)
+    bootstrap_taxonomy_from_url(url, workspace_id)
     return {"status": "taxonomy bootstrapped", "url": url}
 
 
 @app.get("/taxonomy", dependencies=_ADMIN)
-async def get_taxonomy():
+async def get_taxonomy(workspace_id: str | None = None):
+    ws = workspace_id or settings.default_workspace_id
     with get_conn() as conn:
-        rows = conn.execute("SELECT * FROM taxonomy").fetchall()
+        rows = conn.execute("SELECT * FROM taxonomy WHERE workspace_id = ?", (ws,)).fetchall()
     return {"taxonomy": [dict(r) for r in rows]}
 
 
 @app.post("/import-users", dependencies=_ADMIN)
-async def import_users(request: Request):
+async def import_users(request: Request, workspace_id: str | None = None):
     """Import users + ARR from a CSV request body (Content-Type: text/csv).
 
     Columns: email, user_id, arr, plan_type, company.
@@ -1385,24 +1709,78 @@ async def import_users(request: Request):
         csv_text = body.decode("utf-8")
     except UnicodeDecodeError:
         raise HTTPException(status_code=400, detail="body must be UTF-8 CSV text") from None
-    count = import_users_from_csv_text(csv_text)
+    count = import_users_from_csv_text(csv_text, workspace_id)
     return {"status": "imported", "rows": count}
 
 
 @app.get("/me/credits")
-async def my_credits(user_id: str = Depends(require_supabase_user)):
-    """Credit balance for the signed-in dashboard user.
-
-    Single-tenant for now: every user maps to the default workspace.
-    TODO: a users<->workspace mapping table.
-    """
-    ws = settings.default_workspace_id
+async def my_credits(
+    workspace_id: str = Depends(require_workspace),
+    user_id: str = Depends(require_supabase_user),
+):
+    """Credit balance for the signed-in dashboard user's own workspace."""
     return {
         "user_id": user_id,
-        "workspace_id": ws,
+        "workspace_id": workspace_id,
         "enabled": settings.credits_enabled,
-        "balance": credits.get_balance(ws),
+        "balance": credits.get_balance(workspace_id),
     }
+
+
+@app.post("/me/repo-analysis", status_code=202)
+async def my_repo_analysis(request: Request, workspace_id: str = Depends(require_workspace)):
+    """The dashboard's "Generate fix" action: turn one suggested bucket into
+    a real repo-analysis job that opens a GitHub issue on the user's own repo.
+
+    Body: {"label"} — the bucket's taxonomy label, exactly as shown on its
+    `suggested_features` card (``suggested_features.title``). The browser
+    never needs to know the backend's internal bucket id.
+    """
+    ws = workspace_id
+    body = json.loads(await _read_capped_body(request))
+    label = body.get("label")
+    if not label:
+        raise HTTPException(status_code=400, detail="label is required")
+
+    bucket = get_bucket_by_label(ws, str(label))
+    if bucket is None:
+        raise HTTPException(status_code=404, detail="bucket not found")
+
+    workspace = supabase_sync.get_workspace(ws) if supabase_sync.configured() else None
+    installation_id = (workspace or {}).get("github_installation_id")
+    repo_full_name = _normalize_repo_full_name((workspace or {}).get("github_repo") or "")
+    if not installation_id or not repo_full_name:
+        raise HTTPException(
+            status_code=409,
+            detail="connect GitHub and set a repo in workspace settings first",
+        )
+
+    try:
+        job_id = enqueue_repo_analysis(
+            str(installation_id), repo_full_name, bucket["suggested_goal"], ws
+        )
+    except InsufficientCredits as exc:
+        raise HTTPException(status_code=402, detail=str(exc)) from None
+
+    set_bucket_status(ws, bucket["id"], "queued")
+    return {"status": "queued", "job_id": job_id, "label": label}
+
+
+@app.post("/me/github/install-callback")
+async def my_github_install_callback(
+    request: Request, workspace_id: str = Depends(require_workspace)
+):
+    """Record the GitHub App installation id for the signed-in user's workspace,
+    after they complete the install flow on github.com.
+
+    Body: {"installation_id"}
+    """
+    body = json.loads(await _read_capped_body(request))
+    installation_id = body.get("installation_id")
+    if not installation_id:
+        raise HTTPException(status_code=400, detail="installation_id is required")
+    supabase_sync.set_workspace_github_installation(workspace_id, str(installation_id))
+    return {"status": "ok", "workspace_id": workspace_id}
 
 
 @app.get("/credits", dependencies=_ADMIN)
@@ -1517,31 +1895,16 @@ async def health():
 
 
 # =============================================================================
-# SCHEDULER: Hourly polling + weekly drift detection
-# =============================================================================
-
-def start_scheduler():
-    scheduler = BackgroundScheduler()
-
-    # Hourly: poll all sources
-    scheduler.add_job(poll_zendesk,                  "interval", hours=1,  id="zendesk")
-    scheduler.add_job(poll_app_store,                "interval", hours=1,  id="app_store")
-    scheduler.add_job(poll_play_store,               "interval", hours=1,  id="play_store")
-    scheduler.add_job(sync_jira_tickets,             "interval", hours=1,  id="jira_sync")
-    scheduler.add_job(sync_hubspot_contacts,         "interval", hours=6,  id="hubspot_sync")
-    scheduler.add_job(check_velocity_spikes,         "interval", hours=24, id="velocity")
-
-    # Weekly: drift detection + taxonomy suggestions
-    scheduler.add_job(detect_taxonomy_drift,         "interval", weeks=1,  id="drift")
-
-    scheduler.start()
-    log.info("Scheduler started.")
-    return scheduler
-
-
-# =============================================================================
 # STARTUP
 # =============================================================================
+#
+# Periodic work (polling, bucket rebuilds, Jira/HubSpot sync, drift/velocity)
+# used to run on an in-process APScheduler. It's now a set of self-rescheduling
+# jobs on the durable queue (see worker.py's "*_tick" handlers + seed_periodic_jobs):
+# each tick does its work, then re-enqueues itself with a delay. This survives
+# restarts, needs no separate scheduler process, and naturally supports a
+# dynamic, per-workspace set of pollers (one per connected `hooks` row) instead
+# of a fixed list registered once at startup.
 
 def startup():
     log.info("=" * 60)
@@ -1551,7 +1914,7 @@ def startup():
     init_db()
 
     if settings.inline_worker:
-        # Dev convenience: run the worker loop + scheduler in this process.
+        # Dev convenience: run the worker loop + periodic jobs in this process.
         import threading
 
         import worker
@@ -1560,7 +1923,7 @@ def startup():
         app.state.worker_stop = stop
         EmbeddingEngine.get()
         sync_jira_tickets()
-        start_scheduler()
+        worker.seed_periodic_jobs()
         threading.Thread(
             target=worker.run_forever, args=(stop,), name="inline-worker", daemon=True
         ).start()

@@ -12,10 +12,12 @@
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
 -- ── Helper: auto-update updated_at column ───────────────────
+-- SET search_path pins name resolution (Supabase linter: function_search_path_mutable).
 CREATE OR REPLACE FUNCTION public.set_updated_at()
-RETURNS TRIGGER LANGUAGE plpgsql AS $$
+RETURNS TRIGGER LANGUAGE plpgsql SET search_path = public AS $$
 BEGIN NEW.updated_at = NOW(); RETURN NEW; END;
 $$;
+REVOKE EXECUTE ON FUNCTION public.set_updated_at() FROM anon, authenticated;
 
 -- ============================================================
 -- TABLE: profiles
@@ -37,9 +39,9 @@ ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "profiles_select_own"  ON public.profiles;
 DROP POLICY IF EXISTS "profiles_insert_own"  ON public.profiles;
 DROP POLICY IF EXISTS "profiles_update_own"  ON public.profiles;
-CREATE POLICY "profiles_select_own" ON public.profiles FOR SELECT USING (auth.uid() = id);
-CREATE POLICY "profiles_insert_own" ON public.profiles FOR INSERT WITH CHECK (auth.uid() = id);
-CREATE POLICY "profiles_update_own" ON public.profiles FOR UPDATE USING (auth.uid() = id);
+CREATE POLICY "profiles_select_own" ON public.profiles FOR SELECT USING ((select auth.uid()) = id);
+CREATE POLICY "profiles_insert_own" ON public.profiles FOR INSERT WITH CHECK ((select auth.uid()) = id);
+CREATE POLICY "profiles_update_own" ON public.profiles FOR UPDATE USING ((select auth.uid()) = id);
 
 DROP TRIGGER IF EXISTS trg_profiles_updated_at ON public.profiles;
 CREATE TRIGGER trg_profiles_updated_at
@@ -64,10 +66,10 @@ CREATE TABLE IF NOT EXISTS public.workspaces (
 ALTER TABLE public.workspaces ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "workspaces_owner"        ON public.workspaces;
 DROP POLICY IF EXISTS "workspaces_owner_insert"  ON public.workspaces;
-CREATE POLICY "workspaces_owner"       ON public.workspaces FOR SELECT USING (auth.uid() = owner_id);
-CREATE POLICY "workspaces_owner_update" ON public.workspaces FOR UPDATE USING (auth.uid() = owner_id);
-CREATE POLICY "workspaces_owner_insert" ON public.workspaces FOR INSERT WITH CHECK (auth.uid() = owner_id);
-CREATE POLICY "workspaces_owner_delete" ON public.workspaces FOR DELETE USING (auth.uid() = owner_id);
+CREATE POLICY "workspaces_owner"       ON public.workspaces FOR SELECT USING ((select auth.uid()) = owner_id);
+CREATE POLICY "workspaces_owner_update" ON public.workspaces FOR UPDATE USING ((select auth.uid()) = owner_id) WITH CHECK ((select auth.uid()) = owner_id);
+CREATE POLICY "workspaces_owner_insert" ON public.workspaces FOR INSERT WITH CHECK ((select auth.uid()) = owner_id);
+CREATE POLICY "workspaces_owner_delete" ON public.workspaces FOR DELETE USING ((select auth.uid()) = owner_id);
 
 DROP TRIGGER IF EXISTS trg_workspaces_updated_at ON public.workspaces;
 CREATE TRIGGER trg_workspaces_updated_at
@@ -94,9 +96,9 @@ CREATE TABLE IF NOT EXISTS public.notification_preferences (
 ALTER TABLE public.notification_preferences ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "notif_prefs_own" ON public.notification_preferences;
 DROP POLICY IF EXISTS "notif_prefs_own_insert" ON public.notification_preferences;
-CREATE POLICY "notif_prefs_own"        ON public.notification_preferences FOR SELECT USING (auth.uid() = user_id);
-CREATE POLICY "notif_prefs_own_insert" ON public.notification_preferences FOR INSERT WITH CHECK (auth.uid() = user_id);
-CREATE POLICY "notif_prefs_own_update" ON public.notification_preferences FOR UPDATE USING (auth.uid() = user_id);
+CREATE POLICY "notif_prefs_own"        ON public.notification_preferences FOR SELECT USING ((select auth.uid()) = user_id);
+CREATE POLICY "notif_prefs_own_insert" ON public.notification_preferences FOR INSERT WITH CHECK ((select auth.uid()) = user_id);
+CREATE POLICY "notif_prefs_own_update" ON public.notification_preferences FOR UPDATE USING ((select auth.uid()) = user_id);
 
 DROP TRIGGER IF EXISTS trg_notif_updated_at ON public.notification_preferences;
 CREATE TRIGGER trg_notif_updated_at
@@ -127,11 +129,11 @@ ALTER TABLE public.ai_config ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "ai_config_owner" ON public.ai_config;
 DROP POLICY IF EXISTS "ai_config_owner_insert" ON public.ai_config;
 CREATE POLICY "ai_config_owner" ON public.ai_config
-  FOR SELECT USING (EXISTS (SELECT 1 FROM public.workspaces w WHERE w.id = workspace_id AND w.owner_id = auth.uid()));
+  FOR SELECT USING (EXISTS (SELECT 1 FROM public.workspaces w WHERE w.id = workspace_id AND w.owner_id = (select auth.uid())));
 CREATE POLICY "ai_config_owner_insert" ON public.ai_config
-  FOR INSERT WITH CHECK (EXISTS (SELECT 1 FROM public.workspaces w WHERE w.id = workspace_id AND w.owner_id = auth.uid()));
+  FOR INSERT WITH CHECK (EXISTS (SELECT 1 FROM public.workspaces w WHERE w.id = workspace_id AND w.owner_id = (select auth.uid())));
 CREATE POLICY "ai_config_owner_update" ON public.ai_config
-  FOR UPDATE USING (EXISTS (SELECT 1 FROM public.workspaces w WHERE w.id = workspace_id AND w.owner_id = auth.uid()));
+  FOR UPDATE USING (EXISTS (SELECT 1 FROM public.workspaces w WHERE w.id = workspace_id AND w.owner_id = (select auth.uid())));
 
 DROP TRIGGER IF EXISTS trg_ai_config_updated_at ON public.ai_config;
 CREATE TRIGGER trg_ai_config_updated_at
@@ -156,15 +158,15 @@ CREATE TABLE IF NOT EXISTS public.hooks (
 );
 
 ALTER TABLE public.hooks ENABLE ROW LEVEL SECURITY;
+-- A single FOR ALL policy (USING doubles as WITH CHECK when omitted) covers
+-- every command without the per-command duplicates the Supabase linter flags
+-- as "multiple permissive policies" (each one otherwise re-evaluated per row).
 DROP POLICY IF EXISTS "hooks_owner" ON public.hooks;
+DROP POLICY IF EXISTS "hooks_owner_insert" ON public.hooks;
+DROP POLICY IF EXISTS "hooks_owner_update" ON public.hooks;
+DROP POLICY IF EXISTS "hooks_owner_delete" ON public.hooks;
 CREATE POLICY "hooks_owner" ON public.hooks
-  USING (EXISTS (SELECT 1 FROM public.workspaces w WHERE w.id = workspace_id AND w.owner_id = auth.uid()));
-CREATE POLICY "hooks_owner_insert" ON public.hooks
-  FOR INSERT WITH CHECK (EXISTS (SELECT 1 FROM public.workspaces w WHERE w.id = workspace_id AND w.owner_id = auth.uid()));
-CREATE POLICY "hooks_owner_update" ON public.hooks
-  FOR UPDATE USING (EXISTS (SELECT 1 FROM public.workspaces w WHERE w.id = workspace_id AND w.owner_id = auth.uid()));
-CREATE POLICY "hooks_owner_delete" ON public.hooks
-  FOR DELETE USING (EXISTS (SELECT 1 FROM public.workspaces w WHERE w.id = workspace_id AND w.owner_id = auth.uid()));
+  USING (EXISTS (SELECT 1 FROM public.workspaces w WHERE w.id = workspace_id AND w.owner_id = (select auth.uid())));
 
 DROP TRIGGER IF EXISTS trg_hooks_updated_at ON public.hooks;
 CREATE TRIGGER trg_hooks_updated_at
@@ -190,12 +192,10 @@ CREATE TABLE IF NOT EXISTS public.sync_settings (
 
 ALTER TABLE public.sync_settings ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "sync_settings_owner" ON public.sync_settings;
+DROP POLICY IF EXISTS "sync_settings_owner_insert" ON public.sync_settings;
+DROP POLICY IF EXISTS "sync_settings_owner_update" ON public.sync_settings;
 CREATE POLICY "sync_settings_owner" ON public.sync_settings
-  USING (EXISTS (SELECT 1 FROM public.workspaces w WHERE w.id = workspace_id AND w.owner_id = auth.uid()));
-CREATE POLICY "sync_settings_owner_insert" ON public.sync_settings
-  FOR INSERT WITH CHECK (EXISTS (SELECT 1 FROM public.workspaces w WHERE w.id = workspace_id AND w.owner_id = auth.uid()));
-CREATE POLICY "sync_settings_owner_update" ON public.sync_settings
-  FOR UPDATE USING (EXISTS (SELECT 1 FROM public.workspaces w WHERE w.id = workspace_id AND w.owner_id = auth.uid()));
+  USING (EXISTS (SELECT 1 FROM public.workspaces w WHERE w.id = workspace_id AND w.owner_id = (select auth.uid())));
 
 DROP TRIGGER IF EXISTS trg_sync_settings_updated_at ON public.sync_settings;
 CREATE TRIGGER trg_sync_settings_updated_at
@@ -223,14 +223,11 @@ CREATE TABLE IF NOT EXISTS public.api_keys (
 
 ALTER TABLE public.api_keys ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "api_keys_owner" ON public.api_keys;
+DROP POLICY IF EXISTS "api_keys_owner_insert" ON public.api_keys;
+DROP POLICY IF EXISTS "api_keys_owner_update" ON public.api_keys;
+DROP POLICY IF EXISTS "api_keys_owner_delete" ON public.api_keys;
 CREATE POLICY "api_keys_owner" ON public.api_keys
-  USING (EXISTS (SELECT 1 FROM public.workspaces w WHERE w.id = workspace_id AND w.owner_id = auth.uid()));
-CREATE POLICY "api_keys_owner_insert" ON public.api_keys
-  FOR INSERT WITH CHECK (EXISTS (SELECT 1 FROM public.workspaces w WHERE w.id = workspace_id AND w.owner_id = auth.uid()));
-CREATE POLICY "api_keys_owner_update" ON public.api_keys
-  FOR UPDATE USING (EXISTS (SELECT 1 FROM public.workspaces w WHERE w.id = workspace_id AND w.owner_id = auth.uid()));
-CREATE POLICY "api_keys_owner_delete" ON public.api_keys
-  FOR DELETE USING (EXISTS (SELECT 1 FROM public.workspaces w WHERE w.id = workspace_id AND w.owner_id = auth.uid()));
+  USING (EXISTS (SELECT 1 FROM public.workspaces w WHERE w.id = workspace_id AND w.owner_id = (select auth.uid())));
 
 DROP TRIGGER IF EXISTS trg_api_keys_updated_at ON public.api_keys;
 CREATE TRIGGER trg_api_keys_updated_at
@@ -254,12 +251,10 @@ CREATE TABLE IF NOT EXISTS public.webhook_secrets (
 
 ALTER TABLE public.webhook_secrets ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "webhook_secrets_owner" ON public.webhook_secrets;
+DROP POLICY IF EXISTS "webhook_secrets_owner_insert" ON public.webhook_secrets;
+DROP POLICY IF EXISTS "webhook_secrets_owner_update" ON public.webhook_secrets;
 CREATE POLICY "webhook_secrets_owner" ON public.webhook_secrets
-  USING (EXISTS (SELECT 1 FROM public.workspaces w WHERE w.id = workspace_id AND w.owner_id = auth.uid()));
-CREATE POLICY "webhook_secrets_owner_insert" ON public.webhook_secrets
-  FOR INSERT WITH CHECK (EXISTS (SELECT 1 FROM public.workspaces w WHERE w.id = workspace_id AND w.owner_id = auth.uid()));
-CREATE POLICY "webhook_secrets_owner_update" ON public.webhook_secrets
-  FOR UPDATE USING (EXISTS (SELECT 1 FROM public.workspaces w WHERE w.id = workspace_id AND w.owner_id = auth.uid()));
+  USING (EXISTS (SELECT 1 FROM public.workspaces w WHERE w.id = workspace_id AND w.owner_id = (select auth.uid())));
 
 DROP TRIGGER IF EXISTS trg_webhook_secrets_updated_at ON public.webhook_secrets;
 CREATE TRIGGER trg_webhook_secrets_updated_at
@@ -284,12 +279,14 @@ CREATE TABLE IF NOT EXISTS public.activity_log (
 
 ALTER TABLE public.activity_log ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "activity_owner_select" ON public.activity_log;
+DROP POLICY IF EXISTS "activity_owner_insert" ON public.activity_log;
 CREATE POLICY "activity_owner_select" ON public.activity_log FOR SELECT
-  USING (EXISTS (SELECT 1 FROM public.workspaces w WHERE w.id = workspace_id AND w.owner_id = auth.uid()));
+  USING (EXISTS (SELECT 1 FROM public.workspaces w WHERE w.id = workspace_id AND w.owner_id = (select auth.uid())));
 CREATE POLICY "activity_owner_insert" ON public.activity_log FOR INSERT
-  WITH CHECK (EXISTS (SELECT 1 FROM public.workspaces w WHERE w.id = workspace_id AND w.owner_id = auth.uid()));
+  WITH CHECK (EXISTS (SELECT 1 FROM public.workspaces w WHERE w.id = workspace_id AND w.owner_id = (select auth.uid())));
 
 CREATE INDEX IF NOT EXISTS idx_activity_workspace ON public.activity_log(workspace_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_activity_log_user ON public.activity_log(user_id);
 
 -- ============================================================
 -- TABLE: billing
@@ -343,10 +340,11 @@ CREATE TABLE IF NOT EXISTS public.invoices (
 
 ALTER TABLE public.invoices ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "invoices_owner" ON public.invoices;
+DROP POLICY IF EXISTS "invoices_owner_insert" ON public.invoices;
 CREATE POLICY "invoices_owner" ON public.invoices FOR SELECT
-  USING (EXISTS (SELECT 1 FROM public.workspaces w WHERE w.id = workspace_id AND w.owner_id = auth.uid()));
+  USING (EXISTS (SELECT 1 FROM public.workspaces w WHERE w.id = workspace_id AND w.owner_id = (select auth.uid())));
 CREATE POLICY "invoices_owner_insert" ON public.invoices FOR INSERT
-  WITH CHECK (EXISTS (SELECT 1 FROM public.workspaces w WHERE w.id = workspace_id AND w.owner_id = auth.uid()));
+  WITH CHECK (EXISTS (SELECT 1 FROM public.workspaces w WHERE w.id = workspace_id AND w.owner_id = (select auth.uid())));
 
 CREATE INDEX IF NOT EXISTS idx_invoices_workspace ON public.invoices(workspace_id, created_at DESC);
 
@@ -369,12 +367,10 @@ CREATE TABLE IF NOT EXISTS public.suggested_features (
 
 ALTER TABLE public.suggested_features ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "features_owner" ON public.suggested_features;
+DROP POLICY IF EXISTS "features_owner_insert" ON public.suggested_features;
+DROP POLICY IF EXISTS "features_owner_update" ON public.suggested_features;
 CREATE POLICY "features_owner" ON public.suggested_features
-  USING (EXISTS (SELECT 1 FROM public.workspaces w WHERE w.id = workspace_id AND w.owner_id = auth.uid()));
-CREATE POLICY "features_owner_insert" ON public.suggested_features FOR INSERT
-  WITH CHECK (EXISTS (SELECT 1 FROM public.workspaces w WHERE w.id = workspace_id AND w.owner_id = auth.uid()));
-CREATE POLICY "features_owner_update" ON public.suggested_features FOR UPDATE
-  USING (EXISTS (SELECT 1 FROM public.workspaces w WHERE w.id = workspace_id AND w.owner_id = auth.uid()));
+  USING (EXISTS (SELECT 1 FROM public.workspaces w WHERE w.id = workspace_id AND w.owner_id = (select auth.uid())));
 
 CREATE INDEX IF NOT EXISTS idx_features_workspace ON public.suggested_features(workspace_id, created_at DESC);
 
@@ -393,10 +389,9 @@ CREATE TABLE IF NOT EXISTS public.feedback_synthesis (
 
 ALTER TABLE public.feedback_synthesis ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "feedback_owner" ON public.feedback_synthesis;
+DROP POLICY IF EXISTS "feedback_owner_insert" ON public.feedback_synthesis;
 CREATE POLICY "feedback_owner" ON public.feedback_synthesis
-  USING (EXISTS (SELECT 1 FROM public.workspaces w WHERE w.id = workspace_id AND w.owner_id = auth.uid()));
-CREATE POLICY "feedback_owner_insert" ON public.feedback_synthesis FOR INSERT
-  WITH CHECK (EXISTS (SELECT 1 FROM public.workspaces w WHERE w.id = workspace_id AND w.owner_id = auth.uid()));
+  USING (EXISTS (SELECT 1 FROM public.workspaces w WHERE w.id = workspace_id AND w.owner_id = (select auth.uid())));
 
 CREATE INDEX IF NOT EXISTS idx_feedback_workspace ON public.feedback_synthesis(workspace_id);
 
@@ -431,7 +426,7 @@ CREATE POLICY "stats_owner_update" ON public.dashboard_stats FOR UPDATE
 -- Bootstraps all default rows whenever a user signs up.
 -- ============================================================
 CREATE OR REPLACE FUNCTION public.handle_new_user()
-RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER AS $$
+RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE
   ws_id UUID;
   umeta JSONB;
@@ -492,6 +487,13 @@ DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
 CREATE TRIGGER on_auth_user_created
   AFTER INSERT ON auth.users
   FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
+
+-- Trigger invocation does not require EXECUTE privilege on the function (it
+-- runs under the trigger mechanism as the function owner via SECURITY
+-- DEFINER); revoking PUBLIC/anon/authenticated EXECUTE only blocks calling it
+-- directly via /rest/v1/rpc/handle_new_user (Supabase linter:
+-- anon/authenticated_security_definer_function_executable).
+REVOKE EXECUTE ON FUNCTION public.handle_new_user() FROM PUBLIC, anon, authenticated;
 
 -- ============================================================
 -- END OF SCHEMA

@@ -22,17 +22,22 @@ Prices: `PRODRION_CREDITS_PER_FEEDBACK`, `PRODRION_CREDITS_PER_REPO_ANALYSIS`.
 
 | Method | Path | Notes |
 | --- | --- | --- |
+| `GET` | `/me/credits` | balance for the signed-in dashboard user's own workspace (Supabase-JWT-authed) |
 | `GET` | `/credits?workspace_id=` | balance + recent ledger (admin) |
 | `POST` | `/admin/credits/grant` | `{workspace_id?, amount, reason?}` — manual / promo top-up (admin) |
 | `POST` | `/webhook/stripe` | **stub** — bearer-authed, grants `{workspace_id, credits}`. TODO: real Stripe signature verification + `checkout.session.completed` mapping. |
+| `POST` | `/me/repo-analysis` | `{label}` — charges `PRODRION_CREDITS_PER_REPO_ANALYSIS` and queues the "Generate fix" job (Supabase-JWT-authed) |
 
-`POST /webhook/feedback` returns **402** when the workspace is out of credits.
+`POST /webhook/feedback` and `POST /me/repo-analysis` return **402** when the
+workspace is out of credits.
 
 ## Supabase lockdown (run once)
 
 The prototype dashboard writes `billing` / `dashboard_stats` directly from the
-browser under owner-write RLS. Those must become read-only to clients; only the
-backend (service role) writes them.
+browser under owner-write RLS. Those must become read-only to clients; only
+the backend writes them, via its own direct Postgres connection
+(`PRODRION_SUPABASE_DB_URL`, see `supabase_sync.py`), which isn't subject to
+PostgREST's RLS-enforcing `authenticated`/`anon` roles.
 
 ```sql
 -- billing: clients may read, not write
@@ -53,5 +58,5 @@ CREATE POLICY "stats_read_own" ON public.dashboard_stats FOR SELECT
                  WHERE w.id = workspace_id AND w.owner_id = auth.uid()));
 ```
 
-Credit balance is exposed to the dashboard through the backend `GET /credits`
+Credit balance is exposed to the dashboard through the backend `GET /me/credits`
 endpoint, not a Supabase table.

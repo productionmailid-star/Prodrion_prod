@@ -19,7 +19,7 @@ import time
 from hashlib import sha256
 from urllib.parse import urlparse
 
-from fastapi import Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, status
 
 from config import get_settings
 
@@ -108,6 +108,49 @@ async def require_supabase_user(authorization: str | None = Header(default=None)
     if not sub:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "token has no subject")
     return str(sub)
+
+
+# workspace_id -> (value, cached_at_epoch). A signed-in user's workspace
+# rarely changes; a short TTL avoids a Postgres round trip on every request
+# without risking a long-lived stale mapping.
+_workspace_cache: dict[str, tuple[str, float]] = {}
+_WORKSPACE_CACHE_TTL = 60.0
+
+
+async def require_workspace(user_id: str = Depends(require_supabase_user)) -> str:
+    """Resolve the signed-in dashboard user's own workspace id via Supabase.
+
+    A route that also needs the user id can additionally depend on
+    ``require_supabase_user`` — FastAPI caches a dependency's result per
+    request, so the JWT is only verified once either way.
+
+    Raises 404 if the user has no workspace yet (shouldn't happen — the
+    on_auth_user_created trigger creates one at signup) or 503 if Supabase
+    sync isn't configured in production.
+    """
+    import supabase_sync
+
+    cached = _workspace_cache.get(user_id)
+    now = time.time()
+    if cached and now - cached[1] < _WORKSPACE_CACHE_TTL:
+        return cached[0]
+
+    if not supabase_sync.configured():
+        settings = get_settings()
+        if settings.is_production:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "workspace lookup unavailable")
+        _warn_once("PRODRION_SUPABASE_DB_URL is not set - using the default workspace (dev only).")
+        return settings.default_workspace_id
+
+    workspace = supabase_sync.get_workspace_by_owner(user_id)
+    if workspace is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no workspace found for this user")
+    _workspace_cache[user_id] = (workspace["id"], now)
+    return workspace["id"]
+
+
+def clear_workspace_cache() -> None:
+    _workspace_cache.clear()
 
 
 # ---------------------------------------------------------------------------

@@ -224,6 +224,7 @@ def api(tmp_db, monkeypatch):
     import db as _db
     import feedback_platform as fp
     import jobs as _jobs
+    import supabase_sync as _sb
 
     # tmp_db already wired a fresh DB; overlay the auth secrets for these tests.
     s = _settings(
@@ -232,7 +233,7 @@ def api(tmp_db, monkeypatch):
         webhook_secret="hook",
         supabase_jwt_secret="jwtsecret",
     )
-    for mod in (_db, _jobs, _credits, fp):
+    for mod in (_db, _jobs, _credits, fp, _sb):
         monkeypatch.setattr(mod, "settings", s)
     monkeypatch.setattr(security, "get_settings", lambda: s)
 
@@ -289,6 +290,108 @@ def test_me_credits_uses_supabase_token(api):
     assert body["balance"] == 0
     # no token -> 401
     assert client.get("/me/credits").status_code == 401
+
+
+def _dashboard_token(sub: str = "dash-user") -> str:
+    import time
+
+    import jwt
+
+    return jwt.encode(
+        {"sub": sub, "aud": "authenticated", "exp": int(time.time()) + 3600},
+        "jwtsecret",
+        algorithm="HS256",
+    )
+
+
+def test_me_repo_analysis_requires_github_connection(api, monkeypatch):
+    import supabase_sync
+
+    fp, client = api
+    monkeypatch.setattr(supabase_sync, "configured", lambda: True)
+    monkeypatch.setattr(supabase_sync, "get_workspace_by_owner", lambda uid: {"id": "ws-xyz"})
+    monkeypatch.setattr(
+        supabase_sync, "get_workspace", lambda ws: {"id": ws}
+    )  # no installation/repo
+    security.clear_workspace_cache()
+
+    fp._upsert_bucket("ws-xyz", "Billing > Invoice", 3, 0.0)
+    resp = client.post(
+        "/me/repo-analysis",
+        json={"label": "Billing > Invoice"},
+        headers={"Authorization": f"Bearer {_dashboard_token()}"},
+    )
+    assert resp.status_code == 409
+
+
+def test_me_repo_analysis_queues_job_and_marks_bucket_queued(api, monkeypatch):
+    import supabase_sync
+
+    fp, client = api
+    monkeypatch.setattr(supabase_sync, "configured", lambda: True)
+    monkeypatch.setattr(supabase_sync, "get_workspace_by_owner", lambda uid: {"id": "ws-xyz"})
+    monkeypatch.setattr(
+        supabase_sync,
+        "get_workspace",
+        lambda ws: {"id": ws, "github_installation_id": "999", "github_repo": "acme/app"},
+    )
+    monkeypatch.setattr(supabase_sync, "upsert_suggested_feature", lambda *a, **k: None)
+    security.clear_workspace_cache()
+
+    bucket_id = fp._upsert_bucket("ws-xyz", "Billing > Invoice", 3, 0.0)
+    resp = client.post(
+        "/me/repo-analysis",
+        json={"label": "Billing > Invoice"},
+        headers={"Authorization": f"Bearer {_dashboard_token()}"},
+    )
+    assert resp.status_code == 202
+    job = fp.jobs.get_job(resp.json()["job_id"])
+    assert job["type"] == "analyze_repo"
+    assert job["payload"]["repo_full_name"] == "acme/app"
+    assert job["payload"]["installation_id"] == "999"
+    assert job["payload"]["workspace_id"] == "ws-xyz"
+
+    bucket = fp.get_bucket("ws-xyz", bucket_id)
+    assert bucket["status"] == "queued"
+
+
+def test_me_repo_analysis_404_for_unknown_bucket(api, monkeypatch):
+    import supabase_sync
+
+    fp, client = api
+    monkeypatch.setattr(supabase_sync, "configured", lambda: True)
+    monkeypatch.setattr(supabase_sync, "get_workspace_by_owner", lambda uid: {"id": "ws-xyz"})
+    security.clear_workspace_cache()
+
+    resp = client.post(
+        "/me/repo-analysis",
+        json={"label": "Nonexistent"},
+        headers={"Authorization": f"Bearer {_dashboard_token()}"},
+    )
+    assert resp.status_code == 404
+
+
+def test_me_github_install_callback_writes_installation_id(api, monkeypatch):
+    import supabase_sync
+
+    fp, client = api
+    monkeypatch.setattr(supabase_sync, "configured", lambda: True)
+    monkeypatch.setattr(supabase_sync, "get_workspace_by_owner", lambda uid: {"id": "ws-xyz"})
+    recorded = {}
+    monkeypatch.setattr(
+        supabase_sync,
+        "set_workspace_github_installation",
+        lambda ws, inst: recorded.update(workspace_id=ws, installation_id=inst),
+    )
+    security.clear_workspace_cache()
+
+    resp = client.post(
+        "/me/github/install-callback",
+        json={"installation_id": "777"},
+        headers={"Authorization": f"Bearer {_dashboard_token()}"},
+    )
+    assert resp.status_code == 200
+    assert recorded == {"workspace_id": "ws-xyz", "installation_id": "777"}
 
 
 def test_import_users_accepts_csv_body(api):

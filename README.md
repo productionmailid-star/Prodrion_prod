@@ -18,43 +18,52 @@ code each consume credits from a server-held ledger.
 ## The pipeline
 
 ```
-1. Connect        User links review sources (App Store, Play Store, Zendesk,
-                  Slack, Reddit, …) and installs the GitHub App on their repo.
+1. Connect        User connects review sources (App Store, Play Store, Zendesk,
+                  Slack) on the dashboard's Integrations page, and installs
+                  the GitHub App on their repo.
+                  -> web/dashboard.html (hooks table) + github_app.py
 
-2. Fetch          Reviews about the user's company are pulled from each source.
-                  -> reviewer.py  (fetchers + sentiment filter)
+2. Fetch          Each connected source is polled on its own schedule.
+                  -> feedback_platform.py poll_hook() + worker.py's
+                     self-rescheduling "poll_tick" job
 
-3. Filter         Only negative reviews are kept.
-                  -> reviewer.py  (DistilBERT primary, VADER fallback)
+3. Filter         classify_feedback() tags every item's sentiment in the
+                  same LLM call that assigns taxonomy labels; only
+                  "negative" feedback is clustered into a suggested fix.
+                  -> feedback_platform.py classify_feedback()
 
-4. Bucket         Similar issues are embedded and grouped; duplicates of
-                  existing tickets are linked instead of re-created.
-                  -> feedback_platform.py  (embeddings + clustering + FAISS)
+4. Bucket         Negative feedback is grouped by label; buckets at/above a
+                  size threshold are surfaced on the dashboard as a
+                  suggested fix. Duplicates of existing tickets are linked
+                  instead of re-created.
+                  -> feedback_platform.py rebuild_buckets() / match_to_jira()
+                  -> worker.py's "rebuild_buckets_tick" job
+                  -> supabase_sync.py (writes suggested_features)
 
-5. Locate         For a bucket, the user's repo is scanned to find the files
-                  and lines that implement the affected behaviour.
-                  -> repo-agent/  (scan -> chunk -> index -> discover -> locate)
+5. Generate fix   The user clicks "Generate fix" on a bucket. The repo is
+                  scanned to find the files/lines implementing the affected
+                  behaviour, and an AI-generated change is drafted for them.
+                  -> POST /me/repo-analysis -> worker.py's "analyze_repo" job
+                  -> repo-agent/  (scan -> chunk -> index -> discover -> locate -> plan)
 
-6. Draft          An AI-generated code change is produced for those lines.
-                  -> repo-agent/agents/planner.py
-
-7. Ticket         A ticket is created for the user with the suggested patch.
-                  The user applies it as-is, edits it, or ignores it.
+6. Ticket         A GitHub issue is opened with the suggested patch. The
+                  user applies it as-is, edits it, or ignores it.
+                  -> github_app.py create_issue()
 ```
 
 ## Components
 
 | Path | Responsibility |
 | --- | --- |
-| `feedback_platform.py` | Ingestion + bucketing engine. FastAPI service, SQLite store, scheduled pollers, revenue/velocity reporting, natural-language query. |
-| `reviewer.py` | Multi-platform review fetching (Google Play, App Store, Reddit) and negative-review filtering. |
+| `feedback_platform.py` | Ingestion + classification + bucketing engine. FastAPI service, SQLite store, revenue/velocity reporting, natural-language query. |
+| `supabase_sync.py` | Server-only bridge to the dashboard's Supabase database: reads per-workspace `hooks`/`sync_settings`, writes `suggested_features`/`activity_log`/`dashboard_stats`/billing usage. |
+| `jobs.py` / `worker.py` | Durable job queue + the worker process. Self-rescheduling "*_tick" jobs (poll_tick, rebuild_buckets_tick, jira_sync_tick, ...) replace the old in-process scheduler. |
 | `repo-agent/` | Local code-analysis pipeline: scans a repository, indexes it, and produces line-specific change suggestions for a goal. Read-only — never writes to the target repo. |
-| `repo_agent_core.py` | Synchronous `analyze(repo_path, goal)` wrapper around the `repo-agent/` pipeline, used by the worker and the SSE server. |
-| `repo_agent_server.py` | FastAPI wrapper that exposes the pipeline over HTTP + SSE. |
+| `repo_agent_core.py` | Synchronous `analyze(repo_path, goal)` wrapper around the `repo-agent/` pipeline, used by the worker. |
+| `repo_agent_server.py` | FastAPI wrapper exposing the pipeline over HTTP + SSE, for manual/interactive use — not on the production path. |
 | `github_app.py` | GitHub App auth (installation JWT + token cache), sandboxed shallow clone of a user repo, and issue creation. |
 | `credits.py` | Server-authoritative credit ledger — billable actions charge before work is queued. |
-| `goal_to_repo_agent.py` | Connector: turns bucketed feedback labels into goals and runs them through `repo_agent_server.py`. |
-| `web/` | Frontend: landing page, auth, and the workspace dashboard. Backed by Supabase (auth + application database). |
+| `web/` | Frontend: landing page, auth, and the workspace dashboard. Backed by Supabase (auth + application database); pipeline results arrive via `supabase_sync.py`. |
 | `injection.py` | Dev scratch — pushes GitHub issues into the feedback webhook for local testing. Not part of the product. |
 
 ## Deployment

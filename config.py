@@ -62,6 +62,10 @@ class Settings(BaseSettings):
     cors_allow_origins: str = ""
     # Supabase project JWT secret (HS256) — verifies dashboard user tokens.
     supabase_jwt_secret: str = ""
+    # Direct Postgres connection string for the Supabase project (server-only;
+    # read per-workspace integration config, write computed dashboard results).
+    # See supabase_sync.py. Blank disables all dashboard sync (dev/tests).
+    supabase_db_url: str = ""
     # Shared secret for POST /webhook/feedback (X-Webhook-Secret header).
     webhook_secret: str = ""
     # Slack signing secret for POST /webhook/slack signature verification.
@@ -127,30 +131,25 @@ class Settings(BaseSettings):
     taxonomy_bootstrap_url: str = ""
 
     # ---- Slack ----
+    # slack_bot_token is used for admin alerts (send_slack_alert) only. The
+    # per-workspace feedback connector (poll_slack_channel) takes its own bot
+    # token + channel from that workspace's `hooks.config` instead.
     slack_bot_token: str = ""
     slack_alert_channel: str = "#alerts"
 
-    # ---- Zendesk ----
-    zendesk_url: str = ""
-    zendesk_email: str = ""
-    zendesk_token: str = ""
-
-    # ---- App Store / Play Store ----
-    app_store_app_id: str = ""
-    play_store_app_id: str = ""
-
-    # ---- Jira ----
+    # ---- Jira / HubSpot ----
+    # Global (admin's own workspace) — no per-customer connection UI exists
+    # yet for these two, unlike Zendesk/App Store/Play Store/Slack which are
+    # configured per-workspace via the dashboard's `hooks` table.
     jira_url: str = ""
     jira_email: str = ""
     jira_token: str = ""
     jira_project: str = "PROJ"
-
-    # ---- HubSpot ----
     hubspot_api_key: str = ""
 
-    # ---- Feedback -> goal -> repo-agent connector ----
-    feedback_api_url: str = "http://localhost:8000"
-    repo_agent_url: str = "http://localhost:7845"
+    # ---- Bucket builder ----
+    # Minimum feedback_count in a taxonomy label before rebuild_buckets()
+    # surfaces it as a suggested fix on the dashboard.
     goal_min_cluster_size: int = Field(2, ge=1)
 
     @property
@@ -169,9 +168,7 @@ class Settings(BaseSettings):
             raise ValueError("log_level must be one of DEBUG/INFO/WARNING/ERROR/CRITICAL")
         return value
 
-    @field_validator(
-        "taxonomy_bootstrap_url", "zendesk_url", "jira_url", "feedback_api_url", "repo_agent_url"
-    )
+    @field_validator("taxonomy_bootstrap_url", "jira_url")
     @classmethod
     def _blank_or_http_url(cls, value: str) -> str:
         value = value.strip()
@@ -195,10 +192,8 @@ class Settings(BaseSettings):
             problems.append("PRODRION_API_AUTH_TOKEN is required in production")
         if not self.webhook_secret:
             problems.append("PRODRION_WEBHOOK_SECRET is required in production")
-        if self.zendesk_url and not (self.zendesk_email and self.zendesk_token):
-            problems.append(
-                "PRODRION_ZENDESK_URL is set but ZENDESK_EMAIL/ZENDESK_TOKEN are missing"
-            )
+        if not self.supabase_db_url:
+            problems.append("PRODRION_SUPABASE_DB_URL is required in production")
         if self.jira_url and not (self.jira_email and self.jira_token):
             problems.append("PRODRION_JIRA_URL is set but JIRA_EMAIL/JIRA_TOKEN are missing")
 

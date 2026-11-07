@@ -1,8 +1,8 @@
 # Building the dashboard CSS
 
-The HTML currently loads Tailwind from `cdn.tailwindcss.com`, which is a
-**development-only** JIT compiler and must not be used in production. Build a
-static stylesheet instead:
+`index.html` and `dashboard.html` load `/dist/app.css` (built by Tailwind),
+not the `cdn.tailwindcss.com` Play CDN — that JIT compiler is dev-only and
+must never be used in production. Build the stylesheet:
 
 ```bash
 cd web
@@ -10,22 +10,12 @@ npm install
 npm run build:css        # writes web/dist/app.css
 ```
 
-Then in each HTML file replace:
+`web/dist/app.css` is generated, not committed — run the build (or
+`deploy/deploy.sh`, which runs it for you) before serving these pages, or
+they'll render unstyled.
 
-```html
-<!-- dev only -->
-<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
-<script>tailwind.config = { ... }</script>
-```
-
-with:
-
-```html
-<link rel="stylesheet" href="/dist/app.css">
-```
-
-(`tailwind.config.js` already mirrors the inline `tailwind.config` blocks, and
-`src/input.css` is the entry point.)
+(`tailwind.config.js` mirrors what used to be the inline `tailwind.config`
+blocks, and `src/input.css` is the entry point.)
 
 `npm run watch:css` rebuilds on change during development.
 

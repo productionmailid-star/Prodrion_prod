@@ -20,10 +20,12 @@ Browser ──▶ nginx :443
 - DNS: `app.example.com` and `api.example.com` → the VPS IP.
 
 ```bash
-sudo apt update && sudo apt install -y python3-venv python3-full git nginx certbot python3-certbot-nginx ufw
+sudo apt update && sudo apt install -y python3-venv python3-full git nginx certbot python3-certbot-nginx ufw nodejs npm
 sudo ufw allow OpenSSH && sudo ufw allow 'Nginx Full' && sudo ufw enable
 sudo adduser --system --group --home /opt/prodrion prodrion
 ```
+
+(`nodejs`/`npm` build the dashboard's CSS — see step 6 and `web/BUILD.md`.)
 
 ## 2. Code + venv
 
@@ -53,6 +55,10 @@ Fill in every `CHANGE_ME`:
 - `PRODRION_API_AUTH_TOKEN`, `PRODRION_WEBHOOK_SECRET` — `openssl rand -hex 32`
 - `PRODRION_GEMINI_API_KEY` — from aistudio.google.com
 - `PRODRION_SUPABASE_JWT_SECRET` — Supabase project → Settings → API → JWT Secret
+- `PRODRION_SUPABASE_DB_URL` — Supabase project → Settings → Database →
+  Connection string → URI. Required in production; lets the backend read
+  per-workspace `hooks`/`sync_settings` and write `suggested_features`/
+  `activity_log`/`dashboard_stats`/billing usage (see `supabase_sync.py`).
 
 The API refuses to start in production if a required value is missing or the
 config is incoherent (see `config.py` `_validate_production_coherence`). The
@@ -81,14 +87,23 @@ sudo nginx -t && sudo systemctl reload nginx
 
 ## 6. Frontend
 
-Point the dashboard at the API and build the CSS (see `web/BUILD.md`):
+Point the dashboard at the API and (optionally) the GitHub App install page:
 
 ```bash
 # in web/dashboard.html
 const API_BASE = 'https://api.example.com';
+const GITHUB_APP_INSTALL_URL = 'https://github.com/apps/your-app/installations/new';
 ```
 
-Run `web/migrations/001_billing_stats_readonly.sql` in the Supabase SQL editor.
+Build the CSS (see `web/BUILD.md` — `deploy.sh` also does this on every deploy):
+
+```bash
+cd /opt/prodrion/web && npm install && npm run build:css
+```
+
+Run `web/migrations/001_billing_stats_readonly.sql` and
+`web/migrations/002_github_installation.sql`, in that order, in the Supabase
+SQL editor.
 
 ## Operations
 
@@ -118,5 +133,9 @@ Copy backups off-box (rclone / scp) as well.
   contention shows up in the logs (`database is locked`).
 - `repo_agent_server.py` (SSE, port 7845) is **not** exposed by nginx — the
   worker calls `repo_agent_core` in-process. Run it manually only for debugging.
-- The Tailwind Play CDN and the jsDelivr-hosted Supabase SDK are external
-  dependencies; vendor them into `web/` to remove that reliance.
+- Tailwind CSS is pre-built (`web/dist/app.css`, not committed — `deploy.sh`
+  builds it); the jsDelivr-hosted Supabase SDK is still an external
+  dependency (pinned with SRI) — vendor it into `web/` to remove that too.
+- No periodic polling/sync runs until `prodrion-worker` has started at least
+  once with `PRODRION_SUPABASE_DB_URL` configured (it seeds every "*_tick"
+  job chain on startup — see `worker.seed_periodic_jobs`).

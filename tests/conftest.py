@@ -1,9 +1,9 @@
 """Shared test setup.
 
 The application imports a few libraries at module load time (``faiss``,
-``apscheduler``, ``uvicorn``) that the pure code paths under test do not need,
-so we register lightweight stand-ins in ``sys.modules`` before the modules
-under test are imported. Real packages, when installed, are left untouched.
+``uvicorn``) that the pure code paths under test do not need, so we register
+lightweight stand-ins in ``sys.modules`` before the modules under test are
+imported. Real packages, when installed, are left untouched.
 
 The whole test run uses the offline ``fake`` LLM/embedding provider.
 """
@@ -43,9 +43,6 @@ def _ensure_stub(name: str, **attrs: object) -> types.ModuleType:
 # The LLM / embedding stack is exercised through the "fake" provider
 # (config PRODRION_LLM_PROVIDER), so only these remain to stub.
 _ensure_stub("faiss")
-_ensure_stub("apscheduler")
-_ensure_stub("apscheduler.schedulers")
-_ensure_stub("apscheduler.schedulers.background", BackgroundScheduler=object)
 _ensure_stub("uvicorn", run=lambda *a, **k: None)
 
 
@@ -64,6 +61,7 @@ def tmp_db(tmp_path, monkeypatch):
     import github_app as _gh
     import jobs as _jobs
     import security as _sec
+    import supabase_sync as _sb
     import worker as _worker
 
     s = _config.Settings(
@@ -73,11 +71,12 @@ def tmp_db(tmp_path, monkeypatch):
         db_path=str(tmp_path / "test.db"),
         github_clone_dir=str(tmp_path / "gh-clones"),
     )
-    for mod in (_config, _credits, _db, _jobs, _fp, _gh, _sec, _worker):
+    for mod in (_config, _credits, _db, _jobs, _fp, _gh, _sec, _sb, _worker):
         if hasattr(mod, "settings"):
             monkeypatch.setattr(mod, "settings", s, raising=False)
     monkeypatch.setattr(_sec, "get_settings", lambda: s)
 
     _fp.EmbeddingEngine._instance = None
+    _sec.clear_workspace_cache()
     _db.init_db()
     return s

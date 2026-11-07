@@ -22,23 +22,35 @@ log = logging.getLogger("prodrion.jobs")
 PENDING, RUNNING, DONE, FAILED, DEAD = "pending", "running", "done", "failed", "dead"
 
 
-def enqueue(job_type: str, payload: dict, *, max_attempts: int | None = None) -> str:
-    """Add a job and return its id."""
+def enqueue(
+    job_type: str,
+    payload: dict,
+    *,
+    max_attempts: int | None = None,
+    delay_seconds: float = 0.0,
+) -> str:
+    """Add a job and return its id.
+
+    ``delay_seconds`` pushes ``run_after`` into the future — used by
+    self-rescheduling jobs (e.g. "poll_tick") to re-enqueue themselves on an
+    interval without a separate in-process scheduler.
+    """
     job_id = str(uuid.uuid4())
     with get_conn() as conn:
         conn.execute(
             """
-            INSERT INTO jobs (id, type, payload, status, max_attempts)
-            VALUES (?, ?, ?, 'pending', ?)
+            INSERT INTO jobs (id, type, payload, status, max_attempts, run_after)
+            VALUES (?, ?, ?, 'pending', ?, datetime('now', ?))
             """,
             (
                 job_id,
                 job_type,
                 json.dumps(payload),
                 max_attempts or settings.job_max_attempts,
+                f"+{max(0.0, delay_seconds)} seconds",
             ),
         )
-    log.info("Enqueued job %s type=%s", job_id, job_type)
+    log.info("Enqueued job %s type=%s (delay=%.0fs)", job_id, job_type, delay_seconds)
     return job_id
 
 
@@ -121,6 +133,25 @@ def mark_failed(job_id: str, error: str) -> None:
             row["attempts"],
             delay,
         )
+
+
+def has_active(job_type: str, match: dict | None = None) -> bool:
+    """True if a pending/running job of this type (optionally matching a
+    payload subset) already exists. Self-rescheduling jobs use this on
+    worker startup to avoid seeding a duplicate chain after a restart.
+    """
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT payload FROM jobs WHERE type = ? AND status IN ('pending','running')",
+            (job_type,),
+        ).fetchall()
+    if not match:
+        return len(rows) > 0
+    for row in rows:
+        payload = json.loads(row["payload"])
+        if all(payload.get(k) == v for k, v in match.items()):
+            return True
+    return False
 
 
 def get_job(job_id: str) -> dict | None:

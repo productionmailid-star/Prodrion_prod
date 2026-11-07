@@ -12,17 +12,19 @@
 DROP POLICY IF EXISTS "billing_owner"        ON public.billing;
 DROP POLICY IF EXISTS "billing_owner_insert" ON public.billing;
 DROP POLICY IF EXISTS "billing_owner_update" ON public.billing;
+DROP POLICY IF EXISTS "billing_read_own"     ON public.billing;
 CREATE POLICY "billing_read_own" ON public.billing FOR SELECT
   USING (EXISTS (SELECT 1 FROM public.workspaces w
-                 WHERE w.id = workspace_id AND w.owner_id = auth.uid()));
+                 WHERE w.id = workspace_id AND w.owner_id = (select auth.uid())));
 
 -- ---- dashboard_stats -------------------------------------
 DROP POLICY IF EXISTS "stats_owner"        ON public.dashboard_stats;
 DROP POLICY IF EXISTS "stats_owner_insert" ON public.dashboard_stats;
 DROP POLICY IF EXISTS "stats_owner_update" ON public.dashboard_stats;
+DROP POLICY IF EXISTS "stats_read_own"     ON public.dashboard_stats;
 CREATE POLICY "stats_read_own" ON public.dashboard_stats FOR SELECT
   USING (EXISTS (SELECT 1 FROM public.workspaces w
-                 WHERE w.id = workspace_id AND w.owner_id = auth.uid()));
+                 WHERE w.id = workspace_id AND w.owner_id = (select auth.uid())));
 
 -- Credit balance is served by the backend (GET /me/credits), not a table here.
 -- The dashboard's ensureWorkspace() fallback must stop upserting billing /

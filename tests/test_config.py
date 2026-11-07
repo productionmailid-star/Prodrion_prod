@@ -13,6 +13,7 @@ _PROD_LLM = {
     "gemini_api_key": "test-key",
     "api_auth_token": "admin-token",
     "webhook_secret": "hook-secret",
+    "supabase_db_url": "postgresql://user:pass@db.example.supabase.co:5432/postgres",
 }
 
 
@@ -58,7 +59,7 @@ def test_similarity_threshold_bounds():
 
 def test_url_fields_reject_non_http():
     with pytest.raises(ValueError):
-        _settings(zendesk_url="ftp://example.com")
+        _settings(jira_url="ftp://example.com")
 
 
 def test_url_fields_strip_trailing_slash():
@@ -83,24 +84,25 @@ def test_production_requires_gemini_key():
         _settings(environment="production", llm_provider="gemini", gemini_api_key="")
 
 
-def test_production_rejects_partial_zendesk_credentials():
-    with pytest.raises(ValueError, match="ZENDESK"):
-        _settings(environment="production", zendesk_url="https://co.zendesk.com", **_PROD_LLM)
-
-
 def test_production_rejects_partial_jira_credentials():
     with pytest.raises(ValueError, match="JIRA"):
         _settings(environment="production", jira_url="https://co.atlassian.net", **_PROD_LLM)
+
+
+def test_production_requires_supabase_db_url():
+    overrides = {k: v for k, v in _PROD_LLM.items() if k != "supabase_db_url"}
+    with pytest.raises(ValueError, match="SUPABASE_DB_URL"):
+        _settings(environment="production", **overrides)
 
 
 def test_production_accepts_coherent_config():
     s = _settings(
         environment="production",
         api_host="0.0.0.0",
-        zendesk_url="https://co.zendesk.com",
-        zendesk_email="ops@co.com",
-        zendesk_token="tok",
+        jira_url="https://co.atlassian.net",
+        jira_email="ops@co.com",
+        jira_token="tok",
         **_PROD_LLM,
     )
     assert s.is_production is True
-    assert s.zendesk_url == "https://co.zendesk.com"
+    assert s.jira_url == "https://co.atlassian.net"

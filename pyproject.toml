@@ -29,10 +29,8 @@ ignore = [
 # later milestone; suppress only the rules they currently trip so new code
 # is still held to the full set.
 "feedback_platform.py" = ["E741", "B905", "B904"]
-"reviewer.py" = ["E402"]
 "repo_agent_server.py" = ["E402"]
 "repo-agent/main.py" = ["E402"]
-"goal_to_repo_agent.py" = ["E741"]
 "repo-agent/agents/*.py" = ["E741"]
 "repo-agent/repo/*.py" = ["E741"]
 
@@ -41,7 +39,7 @@ line-length = 100
 target-version = ["py310", "py311", "py312"]
 # The prototype is not yet formatted; milestones bring files under black as
 # they are rewritten. CI checks tests/ only for now.
-extend-exclude = '(^|/)(feedback_platform|reviewer|repo_agent_server|goal_to_repo_agent|injection)\.py$|(^|/)repo-agent/'
+extend-exclude = '(^|/)(feedback_platform|repo_agent_server|injection)\.py$|(^|/)repo-agent/'
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
