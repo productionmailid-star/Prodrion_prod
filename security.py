@@ -173,6 +173,45 @@ def verify_webhook_secret(provided: str | None) -> None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid webhook secret")
 
 
+def workspace_webhook_secret(workspace_id: str) -> str | None:
+    """The secret a customer's own systems send to POST /webhook/feedback/{workspace_id}.
+
+    With Supabase configured this is the workspace's own secret from the
+    dashboard (Keys -> Webhook Secret), which the customer can rotate.
+    Without it (local / single-box), a per-workspace secret derived from
+    PRODRION_WEBHOOK_SECRET with HMAC. None when neither exists.
+    """
+    import re
+
+    import supabase_sync
+
+    if supabase_sync.configured():
+        if not re.fullmatch(r"[0-9a-fA-F-]{36}", workspace_id or ""):
+            return None  # Supabase workspace ids are UUIDs
+        return supabase_sync.get_webhook_secret(workspace_id)
+    server_secret = get_settings().webhook_secret
+    if not server_secret:
+        return None
+    return hmac.new(
+        server_secret.encode(), f"workspace-webhook:{workspace_id}".encode(), sha256
+    ).hexdigest()
+
+
+def verify_workspace_webhook_secret(workspace_id: str, provided: str | None) -> None:
+    """Check the X-Webhook-Secret header for POST /webhook/feedback/{workspace_id}."""
+    import supabase_sync
+
+    expected = workspace_webhook_secret(workspace_id)
+    if expected is None:
+        if supabase_sync.configured() or get_settings().is_production:
+            # unknown workspace, or it never created a secret: never accept
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid webhook secret")
+        _warn_once("PRODRION_WEBHOOK_SECRET is not set - webhook auth is DISABLED (dev only).")
+        return
+    if not provided or not _eq(provided, expected):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid webhook secret")
+
+
 def verify_slack_signature(body: bytes, timestamp: str | None, signature: str | None) -> None:
     """Verify a Slack request signature (X-Slack-Signature / -Request-Timestamp)."""
     settings = get_settings()

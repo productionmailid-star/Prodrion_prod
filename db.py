@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS feedback (
     timestamp    TEXT NOT NULL,
     raw_meta     TEXT,
     labels       TEXT,                      -- JSON array (kept for raw views)
+    primary_label TEXT,                     -- the main problem; buckets group on this
     sentiment    TEXT,                      -- 'negative' | 'neutral' | 'positive'
     arr          REAL DEFAULT 0,
     plan_type    TEXT,
@@ -107,7 +108,19 @@ CREATE TABLE IF NOT EXISTS buckets (
     feedback_count INTEGER NOT NULL DEFAULT 0,
     arr_impacted   REAL NOT NULL DEFAULT 0,
     suggested_goal TEXT,
-    status         TEXT NOT NULL DEFAULT 'new',  -- new|queued|resolved|dismissed
+    status         TEXT NOT NULL DEFAULT 'new',  -- new|queued|ticketed|failed|resolved|dismissed
+    -- Outcome of the latest "Generate fix" run, shown on the dashboard.
+    fix_job_id       TEXT,
+    fix_issue_url    TEXT,
+    fix_issue_number INTEGER,
+    fix_files        TEXT,                    -- JSON array of changed paths
+    fix_summary      TEXT,
+    fix_root_cause   TEXT,
+    fix_diff         TEXT,
+    fix_diff_hash    TEXT,                    -- detects two buckets producing the same fix
+    fix_duplicate_of TEXT,                    -- label of the bucket whose ticket already has it
+    fix_error        TEXT,                    -- why no ticket was opened
+    fix_updated_at   TEXT,
     created_at     TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -163,12 +176,26 @@ _ADDED_COLUMNS = {
         ("embed_model", "TEXT"),
         ("workspace_id", "TEXT NOT NULL DEFAULT 'default'"),
         ("sentiment", "TEXT"),
+        ("primary_label", "TEXT"),
     ],
     "jira_tickets": [
         ("embed_model", "TEXT"),
         ("workspace_id", "TEXT NOT NULL DEFAULT 'default'"),
     ],
     "taxonomy": [("workspace_id", "TEXT NOT NULL DEFAULT 'default'")],
+    "buckets": [
+        ("fix_job_id", "TEXT"),
+        ("fix_issue_url", "TEXT"),
+        ("fix_issue_number", "INTEGER"),
+        ("fix_files", "TEXT"),
+        ("fix_summary", "TEXT"),
+        ("fix_root_cause", "TEXT"),
+        ("fix_diff", "TEXT"),
+        ("fix_diff_hash", "TEXT"),
+        ("fix_duplicate_of", "TEXT"),
+        ("fix_error", "TEXT"),
+        ("fix_updated_at", "TEXT"),
+    ],
 }
 
 # Tables whose primary key changed to include workspace_id. SQLite can't

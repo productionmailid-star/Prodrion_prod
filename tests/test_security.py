@@ -383,6 +383,7 @@ def test_me_github_install_callback_writes_installation_id(api, monkeypatch):
         "set_workspace_github_installation",
         lambda ws, inst: recorded.update(workspace_id=ws, installation_id=inst),
     )
+    monkeypatch.setattr(supabase_sync, "workspace_for_installation", lambda inst: None)
     security.clear_workspace_cache()
 
     resp = client.post(

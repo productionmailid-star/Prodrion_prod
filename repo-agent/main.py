@@ -1,148 +1,68 @@
-import os
+"""Command-line entry point for the repo fix agent.
+
+    python repo-agent/main.py /path/to/repo "Checkout crashes when no coupon is applied"
+    python repo-agent/main.py /path/to/repo "..." --report "review text" --out fix.patch
+
+The repository is never modified: the agent works on a temporary copy and
+prints a unified diff you can apply with ``git apply``.
+"""
+
+import argparse
 import sys
 from pathlib import Path
 
-# Make the repo root importable so the shared `config` and `llm` packages
-# resolve when this CLI is run standalone from the repo-agent/ directory.
+# Make the repo root importable so the shared `config`, `llm` and
+# `repo_agent_core` modules resolve when this is run from anywhere.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agents.behaviour_locator import BehaviorLocator
-from agents.discovery import DiscoveryAgent
-from agents.goal_validator import GoalValidator
-from agents.planner import ChangePlanner
-from agents.reporter import Reporter
-from repo.chunker import CodeChunker
-from repo.indexer import CodeIndexer
-from repo.scanner import RepoScanner
+import repo_agent_core
 
 
-def print_header():
-    print("\n" + "=" * 60)
-    print("   CODE AGENT  —  Powered by CodeLlama + Ollama")
-    print("=" * 60)
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Investigate a problem in a repo and propose a fix."
+    )
+    parser.add_argument("repo", nargs="?", help="path to the repository (default: prompt)")
+    parser.add_argument("goal", nargs="?", help="the problem to fix (default: prompt)")
+    parser.add_argument(
+        "--report", action="append", default=[], help="a customer report / symptom (repeatable)"
+    )
+    parser.add_argument("--out", help="write the patch to this file instead of stdout")
+    args = parser.parse_args(argv)
 
-
-def get_repo_path():
-    path = input("\nRepository path (press Enter for current directory): ").strip()
-    if not path:
-        path = os.getcwd()
-    p = Path(path)
-    if not p.exists() or not p.is_dir():
-        print(f"\n  Error: '{path}' is not a valid directory.")
-        sys.exit(1)
-    return str(p.resolve())
-
-
-def step(n, total, label):
-    print(f"\n[{n}/{total}] {label}")
-
-
-def main():
-    print_header()
-
-    TOTAL_STEPS = 7
-
-    # ── STEP 1 — Scan ──────────────────────────────────────────
-    step(1, TOTAL_STEPS, "Scanning repository...")
-
-    REPO_PATH = get_repo_path()
-    print(f"  Using: {REPO_PATH}")
-
-    scanner = RepoScanner(REPO_PATH)
-    files   = scanner.scan_files()
-
-    if not files:
-        print("  No supported source files found. Check filters.py for extensions.")
-        sys.exit(1)
-
-    print(f"  Found {len(files)} source file(s)")
-
-    # ── STEP 2 — Chunk ─────────────────────────────────────────
-    step(2, TOTAL_STEPS, "Chunking code...")
-
-    chunker    = CodeChunker()
-    all_chunks = []
-
-    for file in files:
-        full_path = Path(REPO_PATH) / file
-        all_chunks.extend(chunker.chunk_file(full_path))
-
-    print(f"  Generated {len(all_chunks)} chunk(s)")
-
-    # ── STEP 3 — Index ─────────────────────────────────────────
-    step(3, TOTAL_STEPS, "Preparing index...")
-
-    indexer = CodeIndexer()
-
-    if indexer.is_empty():
-        print("  No existing index — indexing now...")
-        indexer.add_chunks(all_chunks)
-    else:
-        choice = input("  Index already exists. Re-index? (y/N): ").strip().lower()
-        if choice == "y":
-            print("  Clearing old index and re-indexing...")
-            indexer.clear()
-            indexer.add_chunks(all_chunks)
-        else:
-            print("  Using existing index.")
-
-    # ── STEP 4 — Goal ──────────────────────────────────────────
-    step(4, TOTAL_STEPS, "Goal input")
-
-    print()
-    goal = input("  Describe your goal:\n  > ").strip()
-
+    repo = args.repo or input("Repository path: ").strip() or "."
+    if not Path(repo).is_dir():
+        print(f"error: {repo!r} is not a directory", file=sys.stderr)
+        return 2
+    goal = args.goal or input("Describe the problem to fix:\n> ").strip()
     if not goal:
-        print("\n  No goal provided. Exiting.")
-        sys.exit(0)
+        print("error: no problem description given", file=sys.stderr)
+        return 2
 
-    # ── STEP 5 — Validate ──────────────────────────────────────
-    step(5, TOTAL_STEPS, "Validating goal against repository...")
+    def progress(event: dict) -> None:
+        print(f"[step {event['step']}] {', '.join(event['tools'])}", file=sys.stderr)
 
-    validator = GoalValidator(files)
-    status    = validator.validate(goal)
+    result = repo_agent_core.analyze(repo, goal, reports=args.report, on_event=progress)
 
-    print(f"  Result: {status}")
+    if result["status"] != "ok":
+        detail = result.get("error") or result.get("summary") or ""
+        print(f"No fix produced ({result['status']}): {detail}", file=sys.stderr)
+        return 1
 
-    if "INVALID" in status.upper():
-        print("\n  Goal is not compatible with this repository architecture.")
-        print("  Tip: Try rephrasing to focus on backend logic.")
-        sys.exit(0)
-
-    # ── STEP 6 — Discover ──────────────────────────────────────
-    step(6, TOTAL_STEPS, "Discovering relevant files...")
-
-    discovery        = DiscoveryAgent(indexer, files, REPO_PATH)
-    discovered_files = discovery.discover(goal)
-
-    if not discovered_files:
-        print("  No relevant files found. Try rephrasing your goal.")
-        sys.exit(0)
-
-    print(f"  Found {len(discovered_files)} relevant file(s):")
-    for f in discovered_files:
-        print(f"    • {f}")
-
-    # ── STEP 7 — Locate exact lines ────────────────────────────
-    step(7, TOTAL_STEPS, "Locating target lines and generating patches...")
-
-    locator = BehaviorLocator(REPO_PATH)
-    hits    = locator.locate(goal, discovered_files)
-
-    if not hits:
-        print("\n  Could not locate specific lines to change.")
-        print("  Try a more specific goal, e.g. 'deactivate user instead of deleting'.")
-        sys.exit(0)
-
-    print(f"\n  Planning {len(hits)} change(s)...")
-
-    planner = ChangePlanner(REPO_PATH)
-    patches = planner.plan(goal, hits)
-
-    # ── Report ─────────────────────────────────────────────────
-    reporter = Reporter()
-    reporter.display(goal, discovered_files, patches)
+    tests = result["verification"]["tests"]
+    print(f"\nRoot cause: {result['root_cause']}", file=sys.stderr)
+    print(f"Fix: {result['summary']}", file=sys.stderr)
+    print(
+        "Tests: " + ("; ".join(tests["lines"]) if tests["ran"] else f"not run ({tests['reason']})"),
+        file=sys.stderr,
+    )
+    if args.out:
+        Path(args.out).write_text(result["diff"], encoding="utf-8")
+        print(f"Patch written to {args.out} — apply with: git apply {args.out}", file=sys.stderr)
+    else:
+        print(result["diff"], end="")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

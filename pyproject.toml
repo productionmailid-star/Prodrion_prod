@@ -31,15 +31,13 @@ ignore = [
 "feedback_platform.py" = ["E741", "B905", "B904"]
 "repo_agent_server.py" = ["E402"]
 "repo-agent/main.py" = ["E402"]
-"repo-agent/agents/*.py" = ["E741"]
-"repo-agent/repo/*.py" = ["E741"]
 
 [tool.black]
 line-length = 100
 target-version = ["py310", "py311", "py312"]
 # The prototype is not yet formatted; milestones bring files under black as
 # they are rewritten. CI checks tests/ only for now.
-extend-exclude = '(^|/)(feedback_platform|repo_agent_server|injection)\.py$|(^|/)repo-agent/'
+extend-exclude = '(^|/)(feedback_platform|repo_agent_server|injection)\.py$'
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

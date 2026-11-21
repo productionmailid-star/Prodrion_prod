@@ -159,3 +159,68 @@ def test_clone_enforces_size_cap(gh, tmp_path, monkeypatch):
     with pytest.raises(GitHubError, match="over the"):
         gh.clone_repo("42", "acme/app", dest)
     assert not dest.exists()  # cleaned up
+
+
+# --- credential scrubbing ---------------------------------
+
+
+def _git(*args, cwd):
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+    )
+
+
+@pytest.fixture
+def clone_with_token(tmp_path):
+    """A real clone whose git metadata holds an access token, as a
+    `git clone https://x-access-token:<token>@github.com/...` leaves it."""
+    import shutil
+
+    if shutil.which("git") is None:
+        pytest.skip("git not installed")
+    token = "ghs_SECRETTOKEN123"
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git("init", "-q", cwd=origin)
+    (origin / "app.py").write_text("x = 1\n")
+    _git("add", ".", cwd=origin)
+    _git("commit", "-q", "-m", "init", cwd=origin)
+
+    dest = tmp_path / "clone"
+    _git("clone", "-q", str(origin), str(dest), cwd=tmp_path)
+    url = f"https://x-access-token:{token}@github.com/acme/app.git"
+    _git("remote", "set-url", "origin", url, cwd=dest)
+    (dest / ".git" / "logs").mkdir(exist_ok=True)
+    (dest / ".git" / "logs" / "HEAD").write_text(f"0000 1111 t <t> 0 +0000\tclone: from {url}\n")
+    return dest, token
+
+
+def _files_containing(root, needle):
+    return [p for p in root.rglob("*") if p.is_file() and needle.encode() in p.read_bytes()]
+
+
+def test_clone_credentials_are_scrubbed(clone_with_token):
+    dest, token = clone_with_token
+    assert _files_containing(dest, token)  # the leak is real before scrubbing
+
+    github_app._scrub_clone_credentials(dest, "acme/app", token)
+
+    assert _files_containing(dest, token) == []
+    assert (dest / ".git").is_dir() and (dest / "app.py").exists()
+    remote = subprocess.run(
+        ["git", "remote", "get-url", "origin"], cwd=dest, capture_output=True, text=True
+    ).stdout.strip()
+    assert remote == "https://github.com/acme/app.git"
+
+
+def test_scrub_removes_git_dir_if_the_token_survives_elsewhere(clone_with_token):
+    dest, token = clone_with_token
+    (dest / ".git" / "FETCH_HEAD").write_text(f"abc\t\thttps://x:{token}@github.com/acme/app\n")
+
+    github_app._scrub_clone_credentials(dest, "acme/app", token)
+
+    assert not (dest / ".git").exists()
+    assert (dest / "app.py").read_text() == "x = 1\n"

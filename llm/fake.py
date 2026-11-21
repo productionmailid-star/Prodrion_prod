@@ -8,14 +8,21 @@ from .base import Embedder, LLMProvider
 
 
 class FakeLLM(LLMProvider):
-    """Records every call and returns a canned response."""
+    """Records every call and returns a canned response.
 
-    def __init__(self, canned: str = ""):
+    ``script`` is an optional queue of replies handed out one per call (for
+    multi-turn tests); once it is empty the ``canned`` response is returned.
+    """
+
+    def __init__(self, canned: str = "", script: list[str] | None = None):
         self.canned = canned
+        self.script = list(script or [])
         self.calls: list[dict] = []
 
     def generate(self, prompt: str, *, system: str | None = None, temperature: float = 0.1) -> str:
         self.calls.append({"prompt": prompt, "system": system, "temperature": temperature})
+        if self.script:
+            return self.script.pop(0)
         return self.canned
 
 

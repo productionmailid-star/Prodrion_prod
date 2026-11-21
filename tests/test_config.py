@@ -84,6 +84,28 @@ def test_production_requires_gemini_key():
         _settings(environment="production", llm_provider="gemini", gemini_api_key="")
 
 
+def test_production_zai_needs_its_key_and_a_separate_embedder():
+    base = {k: v for k, v in _PROD_LLM.items() if k not in ("llm_provider", "gemini_api_key")}
+    with pytest.raises(ValueError, match="ZAI_API_KEY"):
+        _settings(environment="production", llm_provider="zai", embed_provider="gemini",
+                  gemini_api_key="g", **base)  # fmt: skip
+    with pytest.raises(ValueError, match="EMBED_PROVIDER"):
+        _settings(environment="production", llm_provider="zai", zai_api_key="z", **base)
+    with pytest.raises(ValueError, match="Gemini embeddings"):
+        _settings(environment="production", llm_provider="zai", zai_api_key="z",
+                  embed_provider="gemini", **base)  # fmt: skip
+    ok = _settings(environment="production", llm_provider="zai", zai_api_key="z",
+                   embed_provider="gemini", gemini_api_key="g", **base)  # fmt: skip
+    assert ok.effective_embed_provider == "gemini" and ok.zai_model == "glm-5.3"
+
+
+def test_production_rejects_running_customer_code_on_the_host():
+    with pytest.raises(ValueError, match="REPO_AGENT_SANDBOX=local"):
+        _settings(environment="production", repo_agent_sandbox="local", **_PROD_LLM)
+    assert _settings(environment="production", repo_agent_sandbox="docker", **_PROD_LLM)
+    assert _settings().repo_agent_sandbox == "off"  # nothing is executed by default
+
+
 def test_production_rejects_partial_jira_credentials():
     with pytest.raises(ValueError, match="JIRA"):
         _settings(environment="production", jira_url="https://co.atlassian.net", **_PROD_LLM)

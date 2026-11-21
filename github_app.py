@@ -71,14 +71,90 @@ def installation_token(installation_id: str) -> str:
     return data["token"]
 
 
+def user_installation_ids(code: str) -> set[str]:
+    """Installation ids the GitHub user who just installed/authorized the App
+    can access.
+
+    ``code`` is the OAuth code GitHub appends to the post-install redirect when
+    the App has "Request user authorization (OAuth) during installation"
+    enabled. Exchanging it proves who the user is on GitHub, so a dashboard
+    user can only link an installation their own GitHub account can see.
+    """
+    if not (settings.github_app_client_id and settings.github_app_client_secret):
+        raise GitHubError("GitHub App OAuth client id/secret are not configured")
+    resp = requests.post(
+        settings.github_oauth_token_url,
+        data={
+            "client_id": settings.github_app_client_id,
+            "client_secret": settings.github_app_client_secret,
+            "code": code,
+        },
+        headers={"Accept": "application/json"},
+        timeout=30,
+    )
+    data = resp.json() if resp.status_code < 300 else {}
+    token = data.get("access_token")
+    if not token:
+        reason = data.get("error_description") or data.get("error") or f"HTTP {resp.status_code}"
+        raise GitHubError(f"GitHub sign-in could not be verified: {reason}")
+
+    ids: set[str] = set()
+    for page in range(1, 11):
+        resp = requests.get(
+            f"{settings.github_api_url}/user/installations",
+            params={"per_page": 100, "page": page},
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+            timeout=30,
+        )
+        if resp.status_code >= 300:
+            raise GitHubError(f"listing your GitHub installations failed: {resp.status_code}")
+        items = resp.json().get("installations", [])
+        ids.update(str(item["id"]) for item in items)
+        if len(items) < 100:
+            break
+    return ids
+
+
 def _dir_size(path: Path) -> int:
     return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+
+
+def _scrub_clone_credentials(dest: Path, repo_full_name: str, token: str) -> None:
+    """Remove the access token that ``git clone <url-with-token>`` leaves behind.
+
+    The remote URL is rewritten without credentials and the reflog (which
+    records the clone URL) is dropped. As a backstop, if the token is still
+    found anywhere under ``.git`` the whole directory is removed — the agent
+    works from the checked-out files and does not need git history.
+    """
+    git_dir = dest / ".git"
+    if not git_dir.is_dir():
+        return
+    subprocess.run(
+        ["git", "-C", str(dest), "remote", "set-url", "origin",
+         f"https://github.com/{repo_full_name}.git"],
+        capture_output=True,
+        timeout=30,
+    )  # fmt: skip
+    shutil.rmtree(git_dir / "logs", ignore_errors=True)
+
+    needle = token.encode()
+    for path in git_dir.rglob("*"):
+        try:
+            if path.is_file() and path.stat().st_size < 1_000_000 and needle in path.read_bytes():
+                log.warning("Token still present in %s; removing .git from the clone", path.name)
+                shutil.rmtree(git_dir, ignore_errors=True)
+                return
+        except OSError:
+            continue
 
 
 def clone_repo(installation_id: str, repo_full_name: str, dest: Path) -> Path:
     """Shallow-clone a repo into ``dest`` (which must sit under the sandbox base).
 
-    Nothing from the cloned tree is executed; the caller only reads it.
+    The installation token is scrubbed from the clone's git metadata before
+    returning, so nothing that later reads the tree (the fix agent, or the
+    repo's own tests when a sandbox is enabled) can pick it up.
     """
     base = Path(settings.github_clone_dir).resolve()
     base.mkdir(parents=True, exist_ok=True)
@@ -116,6 +192,8 @@ def clone_repo(installation_id: str, repo_full_name: str, dest: Path) -> Path:
     except subprocess.TimeoutExpired:
         shutil.rmtree(dest, ignore_errors=True)
         raise GitHubError("git clone timed out") from None
+
+    _scrub_clone_credentials(dest, repo_full_name, token)
 
     size = _dir_size(dest)
     if size > settings.github_clone_max_bytes:

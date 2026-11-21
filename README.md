@@ -40,14 +40,18 @@ code each consume credits from a server-held ledger.
                   -> worker.py's "rebuild_buckets_tick" job
                   -> supabase_sync.py (writes suggested_features)
 
-5. Generate fix   The user clicks "Generate fix" on a bucket. The repo is
-                  scanned to find the files/lines implementing the affected
-                  behaviour, and an AI-generated change is drafted for them.
+5. Generate fix   The user clicks "Generate fix" on a bucket. A fix agent is
+                  given the bucket's customer reports and a clone of the repo;
+                  it explores the code, edits as many files as the fix needs,
+                  and must pass verification (changed files parse; with a
+                  sandbox enabled, the repo's own tests do not regress).
                   -> POST /me/repo-analysis -> worker.py's "analyze_repo" job
-                  -> repo-agent/  (scan -> chunk -> index -> discover -> locate -> plan)
+                  -> repo-agent/  (explore -> edit -> verify loop)
 
-6. Ticket         A GitHub issue is opened with the suggested patch. The
-                  user applies it as-is, edits it, or ignores it.
+6. Ticket         A GitHub issue is opened with the root cause, what was
+                  verified, and a unified diff (`git apply`-ready). If no
+                  verified fix is found, no ticket is opened and the credits
+                  are refunded.
                   -> github_app.py create_issue()
 ```
 
@@ -58,9 +62,9 @@ code each consume credits from a server-held ledger.
 | `feedback_platform.py` | Ingestion + classification + bucketing engine. FastAPI service, SQLite store, revenue/velocity reporting, natural-language query. |
 | `supabase_sync.py` | Server-only bridge to the dashboard's Supabase database: reads per-workspace `hooks`/`sync_settings`, writes `suggested_features`/`activity_log`/`dashboard_stats`/billing usage. |
 | `jobs.py` / `worker.py` | Durable job queue + the worker process. Self-rescheduling "*_tick" jobs (poll_tick, rebuild_buckets_tick, jira_sync_tick, ...) replace the old in-process scheduler. |
-| `repo-agent/` | Local code-analysis pipeline: scans a repository, indexes it, and produces line-specific change suggestions for a goal. Read-only — never writes to the target repo. |
-| `repo_agent_core.py` | Synchronous `analyze(repo_path, goal)` wrapper around the `repo-agent/` pipeline, used by the worker. |
-| `repo_agent_server.py` | FastAPI wrapper exposing the pipeline over HTTP + SSE, for manual/interactive use — not on the production path. |
+| `repo-agent/` | The fix agent: a tool-using loop (search / read / edit / run tests) over a confined copy of a repository, with a verification gate. See `repo-agent/README.md`. |
+| `repo_agent_core.py` | Synchronous `analyze(repo_path, goal, reports=...)` entry point to the fix agent, used by the worker. Returns a verified unified diff. |
+| `repo_agent_server.py` | FastAPI wrapper exposing the fix agent over HTTP + SSE, for manual/interactive use — not on the production path. |
 | `github_app.py` | GitHub App auth (installation JWT + token cache), sandboxed shallow clone of a user repo, and issue creation. |
 | `credits.py` | Server-authoritative credit ledger — billable actions charge before work is queued. |
 | `web/` | Frontend: landing page, auth, and the workspace dashboard. Backed by Supabase (auth + application database); pipeline results arrive via `supabase_sync.py`. |

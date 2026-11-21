@@ -1,7 +1,7 @@
 # Deployment — Hostinger KVM 4 (Ubuntu)
 
 One VPS runs everything: the API (`prodrion-api`), the background worker
-(`prodrion-worker`), SQLite, and the on-disk FAISS/Chroma indexes. nginx
+(`prodrion-worker`), SQLite, and the in-process FAISS index. nginx
 terminates TLS and serves the static dashboard. LLM inference is the Gemini
 free-tier API.
 
@@ -101,9 +101,36 @@ Build the CSS (see `web/BUILD.md` — `deploy.sh` also does this on every deploy
 cd /opt/prodrion/web && npm install && npm run build:css
 ```
 
-Run `web/migrations/001_billing_stats_readonly.sql` and
-`web/migrations/002_github_installation.sql`, in that order, in the Supabase
-SQL editor.
+Run the migrations in `web/migrations/` (001, 002, 003, 004), in that order,
+in the Supabase SQL editor. **004 is a security fix**: without it a signed-in
+user can set any GitHub installation id on their own workspace directly
+through the Supabase API.
+
+### GitHub App settings
+
+- **Setup URL** and **Callback URL**: the dashboard URL
+  (`https://app.example.com/dashboard.html`).
+- Enable **Request user authorization (OAuth) during installation**. GitHub
+  then adds a `code` to the redirect, and the backend uses it to check that the
+  signed-in user's GitHub account can access the installation being linked.
+- Copy the App's **Client ID** and a new **client secret** into
+  `PRODRION_GITHUB_APP_CLIENT_ID` / `PRODRION_GITHUB_APP_CLIENT_SECRET`
+  (required in production).
+- Permissions: Contents (read), Issues (read & write), Metadata (read).
+
+### Customer onboarding (what happens without any operator step)
+
+1. Customer signs up; workspace created. Grant trial credits
+   (`POST /admin/credits/grant`) or let Stripe do it.
+2. They connect review sources (Integrations). New sources start syncing
+   within a minute (`discover_tick`); a failing source shows as **error**.
+3. Product areas are learned from their first
+   `PRODRION_TAXONOMY_AUTO_MIN_FEEDBACK` reviews, or built from the help-center
+   URL they enter under Settings -> Product areas.
+4. Problem buckets appear on the dashboard; "Generate fix" shows its status and
+   the files, root cause and patch on the card, and opens a GitHub issue.
+5. Feedback from their own systems: `POST /webhook/feedback/<workspace-id>`
+   with their Webhook Secret (Keys page) in `X-Webhook-Secret`.
 
 ## Operations
 
@@ -133,6 +160,21 @@ Copy backups off-box (rclone / scp) as well.
   contention shows up in the logs (`database is locked`).
 - `repo_agent_server.py` (SSE, port 7845) is **not** exposed by nginx — the
   worker calls `repo_agent_core` in-process. Run it manually only for debugging.
+- **Fix agent test execution is off by default** (`PRODRION_REPO_AGENT_SANDBOX=off`):
+  fixes are syntax-checked but the customer's tests are not run, and the ticket
+  says so. To let the agent run tests, install Docker on the VPS
+  (`apt install docker.io`), add the service user to the `docker` group
+  (`usermod -aG docker prodrion`), pre-pull the image, and set
+  `PRODRION_REPO_AGENT_SANDBOX=docker`. Customer code then runs only inside a
+  throwaway container (no network except during dependency install, no
+  capabilities, non-root, read-only root filesystem, CPU/memory/PID limits, none
+  of the worker's environment). Never use `local` on the server.
+- One fix job holds the single worker for up to `PRODRION_REPO_AGENT_TIMEOUT_SECONDS`
+  (plus test runs); other queued jobs wait behind it.
+- On the Gemini free tier, one fix job can use up to `PRODRION_REPO_AGENT_MAX_STEPS`
+  requests, and the free tier currently allows only ~20 requests per model per
+  day. When the quota runs out, `analyze_repo` jobs are postponed until it
+  resets (not failed or refunded). Use a paid key for anything beyond a demo.
 - Tailwind CSS is pre-built (`web/dist/app.css`, not committed — `deploy.sh`
   builds it); the jsDelivr-hosted Supabase SDK is still an external
   dependency (pinned with SRI) — vendor it into `web/` to remove that too.
