@@ -357,7 +357,9 @@
         <div>
           <h3 class="text-xs font-black text-slate-400 uppercase tracking-widest mb-4 flex items-center gap-2"><span class="material-symbols-outlined text-[16px]">webhook</span>Webhook Secret</h3>
           <div class="bg-white border border-border-light rounded-xl p-5">
-            <p class="text-xs text-slate-500 mb-4">Use this to verify incoming webhook payloads are from ProdMind.</p>
+            <p class="text-xs text-slate-500 mb-2">Send customer feedback from your own systems: <code class="font-mono">POST</code> JSON like <code class="font-mono">{"text": "...", "id": "..."}</code> to</p>
+            <code id="webhookUrl" class="block text-xs font-mono text-slate-700 bg-slate-50 border border-slate-200 px-3 py-2 rounded-lg mb-2 break-all">—</code>
+            <p class="text-xs text-slate-500 mb-4">with this secret in the <code class="font-mono">X-Webhook-Secret</code> header.</p>
             <div class="flex items-center gap-3">
               <code class="flex-1 text-xs font-mono text-slate-700 bg-slate-50 border border-slate-200 px-3 py-2.5 rounded-lg" id="webhookSecret">whsec_••••••••••••••••••••••••••••••••</code>
               <button onclick="revealWebhook()" class="px-3 py-2 bg-slate-100 border border-slate-200 text-slate-600 text-xs font-bold rounded-lg hover:bg-slate-200 transition-colors">Reveal</button>
@@ -427,6 +429,15 @@
           <div class="flex items-center gap-3">
             <button type="button" id="github-connect-btn" onclick="connectGithub()" class="px-3 py-2 text-xs font-bold rounded-lg bg-slate-900 text-white hover:bg-slate-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">Connect GitHub</button>
             <span id="github-connect-status" class="text-xs text-slate-500"></span>
+          </div>
+          <div class="pt-4 border-t border-slate-100">
+            <label class="text-xs font-bold text-slate-700 block mb-1.5">Product areas <span class="text-slate-400 font-normal">(how reviews are grouped into problems)</span></label>
+            <p id="taxonomy-status" class="text-xs text-slate-500 mb-2">Loading…</p>
+            <div class="flex gap-2">
+              <input id="taxonomy-url" type="url" placeholder="https://help.your-product.com" class="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-primary/20"/>
+              <button type="button" id="taxonomy-build-btn" onclick="buildTaxonomy()" class="px-3 py-2 text-xs font-bold rounded-lg bg-slate-900 text-white hover:bg-slate-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">Build from URL</button>
+            </div>
+            <p class="text-[11px] text-slate-400 mt-1.5">Optional. Without a URL, product areas are learned automatically from your first reviews.</p>
           </div>
         </section>
 
@@ -546,6 +557,16 @@
 
 <!-- Toast container -->
 <div id="toast"></div>
+<!-- Fix result modal -->
+<div id="fixModal" class="hidden fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4" onclick="if (event.target === this) closeFix()">
+  <div class="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[90vh] overflow-y-auto p-6 space-y-3">
+    <div class="flex items-start justify-between gap-4">
+      <div><p class="text-[10px] font-black uppercase text-slate-400">Suggested fix</p><h3 id="fix-modal-title" class="font-bold text-lg"></h3></div>
+      <button type="button" onclick="closeFix()" class="text-slate-400 hover:text-slate-700"><span class="material-symbols-outlined">close</span></button>
+    </div>
+    <div id="fix-modal-body" class="space-y-3"></div>
+  </div>
+</div>
 
 <script>
 // ════════════════════════════════════════════════════════════
@@ -555,11 +576,11 @@ const SUPABASE_URL  = 'https://nvsiexpbfiejdztidcra.supabase.co';
 const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im52c2lleHBiZmllamR6dGlkY3JhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTQwMzk1ODQsImV4cCI6MjEwOTYxNTU4NH0.XuwtIUkPUpnZemRdTX1G3AJxu0GUiuOZQJ9ZJIxQ3WE';
 
 // Prodrion backend API base (e.g. https://api.example.com). Empty = disabled.
-const API_BASE = '';
+const API_BASE = 'https://api.example.com';
 // GitHub App public install page (e.g. https://github.com/apps/your-app/installations/new).
 // Empty = disabled. Create the App's "Setup URL" to redirect back here
 // (this page) with ?installation_id=... appended.
-const GITHUB_APP_INSTALL_URL = '';
+const GITHUB_APP_INSTALL_URL = 'https://github.com/apps/Prodrion-Fix-Bot/installations/new';
 
 const { createClient } = supabase;
 const sb = createClient(SUPABASE_URL, SUPABASE_ANON);
@@ -583,8 +604,10 @@ let webhookSecretValue = null; // cached after first reveal
   await loadPage('dashboard');
 })();
 
-// GitHub redirects back here with ?installation_id=...&setup_action=install
+// GitHub redirects back here with ?installation_id=...&setup_action=install&code=...
 // after the user completes the App install flow (see GITHUB_APP_INSTALL_URL).
+// `code` (present when the App requests user authorization during install)
+// lets the backend verify this GitHub user really has access to the installation.
 async function handleGithubInstallRedirect(accessToken) {
   const params = new URLSearchParams(window.location.search);
   const installationId = params.get('installation_id');
@@ -593,15 +616,18 @@ async function handleGithubInstallRedirect(accessToken) {
     const res = await fetch(`${API_BASE}/me/github/install-callback`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
-      body: JSON.stringify({ installation_id: installationId }),
+      body: JSON.stringify({ installation_id: installationId, code: params.get('code') || '' }),
     });
+    const body = await res.json().catch(() => ({}));
     if (res.ok) toast('GitHub connected.');
-    else toast('Could not confirm the GitHub install.', true);
+    else toast(`Could not connect GitHub: ${body.detail || body.error?.message || res.status}`, true);
   } catch (_) {
     toast('Backend unreachable — GitHub install not confirmed.', true);
   } finally {
     params.delete('installation_id');
     params.delete('setup_action');
+    params.delete('code');
+    params.delete('state');
     const clean = window.location.pathname + (params.toString() ? `?${params}` : '');
     window.history.replaceState({}, '', clean);
   }
@@ -769,7 +795,9 @@ function renderSuggestedFeatures(features) {
       <button type="button" class="generate-fix-btn mt-3 w-full text-xs font-bold py-1.5 rounded-lg bg-primary/10 text-primary hover:bg-primary hover:text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed" data-label="${esc(f.title)}" ${API_BASE ? '' : 'disabled title="Backend not configured"'}>
         Generate fix
       </button>
+      <div class="fix-status mt-2 text-[11px] leading-snug" data-label="${esc(f.title)}"></div>
     </div>`).join('');
+  loadFixes();
 }
 
 // Delegated click handler: one listener for every "Generate fix" button,
@@ -799,7 +827,8 @@ async function generateFix(label, btn) {
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
     btn.textContent = 'Queued ✓';
-    toast(`Queued "${label}" — a GitHub issue will appear once analysis finishes.`);
+    toast(`Queued "${label}" — the fix will appear here and as a GitHub issue when ready.`);
+    loadFixes();
   } catch (err) {
     btn.disabled = false;
     btn.textContent = original;
@@ -1102,6 +1131,7 @@ async function loadKeys() {
   renderKeysTable(keys || []);
   webhookSecretValue = null;
   document.getElementById('webhookSecret').textContent = 'whsec_••••••••••••••••••••••••••••••••';
+  setText('webhookUrl', API_BASE ? `${API_BASE}/webhook/feedback/${wsId}` : 'Backend not configured for this deployment.');
 }
 
 function renderKeysTable(keys) {
@@ -1294,6 +1324,7 @@ async function loadSettings() {
     }
     connectBtn.disabled = !GITHUB_APP_INSTALL_URL;
   }
+  loadTaxonomyStatus();
   if (profile) {
     document.getElementById('profile-name').value  = profile.full_name  || currentUser.user_metadata?.full_name || '';
     document.getElementById('profile-role').value  = profile.role_title || '';
@@ -1430,6 +1461,117 @@ function renderInvoices(invoices) {
         <button class="text-primary hover:underline text-xs font-bold">PDF</button>
       </div>
     </div>`).join('');
+}
+
+// ════════════════════════════════════════════════════════════
+//  FIX RESULTS ("Generate fix" outcome per bucket)
+// ════════════════════════════════════════════════════════════
+let fixesByLabel = {};
+let fixesPollTimer = null;
+
+async function apiGet(path) {
+  const { data: { session } } = await sb.auth.getSession();
+  const res = await fetch(`${API_BASE}${path}`, { headers: { Authorization: `Bearer ${session.access_token}` } });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.detail || body.error?.message || `HTTP ${res.status}`);
+  return body;
+}
+
+async function loadFixes() {
+  if (!API_BASE) return;
+  let data;
+  try { data = await apiGet('/me/fixes'); } catch (_) { return; }
+  fixesByLabel = Object.fromEntries((data.fixes || []).map(f => [f.label, f]));
+  let pending = false;
+  document.querySelectorAll('.fix-status').forEach(el => {
+    const fix = fixesByLabel[el.dataset.label];
+    const btn = el.parentElement.querySelector('.generate-fix-btn');
+    el.innerHTML = fix ? fixStatusHtml(fix) : '';
+    if (!fix || !btn) return;
+    if (fix.status === 'queued') { pending = true; btn.disabled = true; btn.textContent = 'Generating fix…'; }
+    else if (fix.status === 'ticketed') { btn.disabled = false; btn.textContent = 'Regenerate fix'; }
+    else if (fix.status === 'failed') { btn.disabled = false; btn.textContent = 'Try again'; }
+  });
+  clearTimeout(fixesPollTimer);
+  if (pending) fixesPollTimer = setTimeout(loadFixes, 15000);
+}
+
+function fixStatusHtml(fix) {
+  const view = `<button type="button" class="font-bold text-primary hover:underline" onclick="openFix(this.dataset.label)" data-label="${esc(fix.label)}">View</button>`;
+  const issue = fix.issue_url ? `<a href="${esc(fix.issue_url)}" target="_blank" rel="noopener" class="font-bold text-primary hover:underline">ticket #${esc(fix.issue_number)}</a>` : 'a ticket';
+  if (fix.status === 'queued') return '<span class="text-amber-600">Analysing your repository…</span>';
+  if (fix.status === 'ticketed' && fix.duplicate_of) return `<span class="text-slate-600">Same fix as “${esc(fix.duplicate_of)}” — see ${issue} (credits refunded). ${view}</span>`;
+  if (fix.status === 'ticketed') return `<span class="text-green-700">Fix ready: ${(fix.files || []).length} file(s) — ${issue}. ${view}</span>`;
+  if (fix.status === 'failed') return `<span class="text-red-600">No fix: ${esc((fix.error || '').slice(0, 120))} (credits refunded). ${view}</span>`;
+  return '';
+}
+
+function openFix(label) {
+  const fix = fixesByLabel[label];
+  if (!fix) return;
+  setText('fix-modal-title', fix.label);
+  const parts = [];
+  if (fix.status === 'failed') {
+    parts.push(`<p class="text-sm text-red-600">${esc(fix.error || 'No fix was produced.')}</p>`);
+  } else {
+    if (fix.duplicate_of) parts.push(`<p class="text-xs text-slate-500">This is the same change as the ticket for “${esc(fix.duplicate_of)}”.</p>`);
+    parts.push(`<h4 class="text-xs font-black uppercase text-slate-400">Root cause</h4><p class="text-sm">${esc(fix.root_cause || '—')}</p>`);
+    parts.push(`<h4 class="text-xs font-black uppercase text-slate-400">What the change does</h4><p class="text-sm whitespace-pre-line">${esc(fix.summary || '—')}</p>`);
+    parts.push(`<h4 class="text-xs font-black uppercase text-slate-400">Files to change</h4><ul class="text-sm font-mono list-disc pl-5">${(fix.files || []).map(f => `<li>${esc(f)}</li>`).join('')}</ul>`);
+    parts.push(`<h4 class="text-xs font-black uppercase text-slate-400">Suggested code change</h4><pre class="text-[11px] font-mono bg-slate-900 text-slate-100 rounded-lg p-3 overflow-auto max-h-80">${(fix.diff || '').split('\n').map(line => {
+      const cls = line.startsWith('+') && !line.startsWith('+++') ? 'text-green-300' : line.startsWith('-') && !line.startsWith('---') ? 'text-red-300' : line.startsWith('@@') ? 'text-sky-300' : '';
+      return `<span class="${cls}">${esc(line)}</span>`;
+    }).join('\n')}</pre>`);
+    if (fix.issue_url) parts.push(`<a href="${esc(fix.issue_url)}" target="_blank" rel="noopener" class="inline-block text-sm font-bold text-primary hover:underline">Open ticket #${esc(fix.issue_number)} on GitHub →</a>`);
+    parts.push('<p class="text-[11px] text-slate-400">AI-generated — review and run your tests before merging.</p>');
+  }
+  document.getElementById('fix-modal-body').innerHTML = parts.join('');
+  document.getElementById('fixModal').classList.remove('hidden');
+}
+
+function closeFix() { document.getElementById('fixModal').classList.add('hidden'); }
+
+// ════════════════════════════════════════════════════════════
+//  PRODUCT AREAS (taxonomy)
+// ════════════════════════════════════════════════════════════
+async function loadTaxonomyStatus() {
+  const el = document.getElementById('taxonomy-status');
+  if (!el) return;
+  if (!API_BASE) { el.textContent = 'Backend not configured for this deployment.'; return; }
+  try {
+    const t = await apiGet('/me/taxonomy');
+    const build = t.last_build;
+    let text = t.labels.length
+      ? `${t.labels.length} product areas, e.g. ${t.labels.slice(0, 3).join(' · ')}`
+      : `Not set up yet — will be learned from your reviews after ${t.auto_build_after_reviews} arrive.`;
+    if (build && ['pending', 'running'].includes(build.status)) text = `Building from ${build.url}…`;
+    else if (build && build.status === 'dead') text += ` — last build from ${build.url} failed: ${build.error || 'unknown error'}`;
+    el.textContent = text;
+    if (build && ['pending', 'running'].includes(build.status)) setTimeout(loadTaxonomyStatus, 10000);
+  } catch (err) { el.textContent = `Could not load product areas: ${err.message}`; }
+}
+
+async function buildTaxonomy() {
+  const url = document.getElementById('taxonomy-url').value.trim();
+  if (!url) { toast('Enter your help-center or docs URL.', true); return; }
+  const btn = document.getElementById('taxonomy-build-btn');
+  btn.disabled = true;
+  try {
+    const { data: { session } } = await sb.auth.getSession();
+    const res = await fetch(`${API_BASE}/me/taxonomy`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
+      body: JSON.stringify({ url }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.detail || body.error?.message || `HTTP ${res.status}`);
+    toast('Building product areas — your reviews will be re-sorted.');
+    loadTaxonomyStatus();
+  } catch (err) {
+    toast(err.message || 'Could not start the build.', true);
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 // ════════════════════════════════════════════════════════════

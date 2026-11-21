@@ -1,20 +1,21 @@
 """
 repo_agent_server.py
 --------------------
-A thin FastAPI wrapper around the repo-agent pipeline, for manual/interactive
+A thin FastAPI wrapper around the repo fix agent, for manual/interactive
 use (dev tooling). The production path — worker.py's "analyze_repo" job,
 triggered by the dashboard's "Generate fix" button — calls
 repo_agent_core.analyze() directly and does not go through this server.
 
 Exposes:
-  POST /api/run          — start a pipeline session
-  GET  /api/stream/{id}  — SSE stream for plan / results / done events
+  POST /api/run          — start an agent session
+  GET  /api/stream/{id}  — SSE stream: step* -> plan -> results -> done
   GET  /api/health       — liveness check
 
 Start with:
   uvicorn repo_agent_server:app --port 7845
 
-Does NOT modify any file inside repo-agent/.
+The analysed repository is never modified: the agent works on a temporary
+copy and the fix comes back as a unified diff.
 """
 
 import asyncio
@@ -111,10 +112,10 @@ async def run(req: RunRequest):
     queue: asyncio.Queue = asyncio.Queue()
     _sessions[session_id] = (queue, time.monotonic())
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
-    # Run the blocking pipeline in a thread so we don't block the event loop
-    loop.run_in_executor(None, _run_pipeline, req.goal, repo_path, queue)
+    # Run the blocking agent in a thread so we don't block the event loop
+    loop.run_in_executor(None, _run_pipeline, req.goal, repo_path, queue, loop)
 
     return RunResponse(ok=True, session_id=session_id)
 
@@ -158,20 +159,36 @@ async def stream(session_id: str):
 
 
 # ── Pipeline (runs in thread pool) ───────────────────────────────────────────
-def _run_pipeline(goal: str, repo_path: str, queue: asyncio.Queue):
-    """Run the repo-agent pipeline and stream SSE events onto `queue`."""
+def _run_pipeline(
+    goal: str, repo_path: str, queue: asyncio.Queue, loop: asyncio.AbstractEventLoop
+) -> None:
+    """Run the fix agent and stream SSE events onto `queue`.
 
-    def push(event_type: str, data: dict):
-        loop = asyncio.get_event_loop()
+    Runs in a worker thread, so events are handed to the server's event loop
+    (captured by the caller — a worker thread has no loop of its own).
+    """
+
+    def push(event_type: str, data: dict) -> None:
         loop.call_soon_threadsafe(queue.put_nowait, {"type": event_type, "data": data})
 
     try:
-        result = repo_agent_core.analyze(repo_path, goal)
+        result = repo_agent_core.analyze(
+            repo_path, goal, on_event=lambda event: push("step", event)
+        )
         if result["status"] != "ok":
-            push("done", {"error": result.get("error", result["status"])})
+            detail = result.get("error") or result.get("summary") or result["status"]
+            push("done", {"status": result["status"], "error": detail})
             return
-        push("plan", {"plan": result["plan"]})
-        push("results", {"results": result["results"]})
-        push("done", {})
+        push("plan", {"plan": {"goal": goal, "files_to_modify": result["files_changed"]}})
+        push(
+            "results",
+            {
+                "summary": result["summary"],
+                "root_cause": result["root_cause"],
+                "diff": result["diff"],
+                "verification": result["verification"],
+            },
+        )
+        push("done", {"status": "ok"})
     except Exception as exc:
-        push("done", {"error": str(exc)})
+        push("done", {"status": "error", "error": str(exc)})

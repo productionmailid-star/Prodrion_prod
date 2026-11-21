@@ -3,8 +3,9 @@
     from llm import get_llm, get_embedder
 
 Both return process-wide singletons for the provider named by
-``PRODRION_LLM_PROVIDER`` (``gemini`` | ``ollama`` | ``fake``). Call
-:func:`reset_cache` in tests after changing the setting.
+``PRODRION_LLM_PROVIDER`` (``gemini`` | ``zai`` | ``ollama`` | ``fake``).
+Embeddings use ``PRODRION_EMBED_PROVIDER`` when set (Z.ai is generation-only).
+Call :func:`reset_cache` in tests after changing the setting.
 """
 
 from __future__ import annotations
@@ -28,6 +29,16 @@ def _build_llm(provider: str) -> LLMProvider:
 
         s = get_settings()
         return GeminiLLM(s.gemini_api_key, s.gemini_model)
+    if provider == "zai":
+        from .zai import ZaiLLM
+
+        s = get_settings()
+        return ZaiLLM(
+            s.zai_api_key,
+            s.zai_model,
+            base_url=s.zai_base_url,
+            reasoning_effort=s.zai_reasoning_effort,
+        )
     if provider == "ollama":
         from .ollama import OllamaLLM
 
@@ -49,7 +60,11 @@ def _build_embedder(provider: str) -> Embedder:
 
         s = get_settings()
         return OllamaEmbedder(s.ollama_url, s.ollama_embed_model)
-    raise ValueError(f"unknown PRODRION_LLM_PROVIDER: {provider!r}")
+    if provider == "zai":
+        raise ValueError(
+            "Z.ai does not provide embeddings here; set PRODRION_EMBED_PROVIDER=gemini (or ollama)"
+        )
+    raise ValueError(f"unknown embedding provider: {provider!r}")
 
 
 def get_llm() -> LLMProvider:
@@ -62,7 +77,7 @@ def get_llm() -> LLMProvider:
 def get_embedder() -> Embedder:
     global _embedder
     if _embedder is None:
-        _embedder = _build_embedder(get_settings().llm_provider)
+        _embedder = _build_embedder(get_settings().effective_embed_provider)
     return _embedder
 
 

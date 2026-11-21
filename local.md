@@ -46,7 +46,7 @@ pip install -r requirements.txt
 > On Debian/Ubuntu you may see `externally-managed-environment` — that's why we
 > use a venv. Always activate `.venv` before running anything.
 
-The first install pulls a fair amount (faiss, chromadb, tree-sitter, etc.).
+The first install pulls a fair amount (faiss, tree-sitter, etc.).
 `google-genai` is installed too but is never imported when the provider is
 `ollama`.
 
@@ -181,29 +181,28 @@ pytest        # 120 tests, run on a fake provider — Ollama not required
 
 ---
 
-## 7. The repo-agent (code-change suggestions) — optional
+## 7. The repo fix agent — optional
 
-This turns a goal into line-specific patch suggestions for a local codebase.
-It uses the same Ollama provider. A code-tuned model helps:
+This investigates a problem in a local codebase and proposes a verified fix as
+a unified diff. It uses the configured LLM provider; a strong code model
+matters a lot here (with Ollama, e.g. `ollama pull qwen2.5-coder` and set
+`PRODRION_OLLAMA_MODEL=qwen2.5-coder`).
 
-```bash
-ollama pull qwen2.5-coder        # or: ollama pull codellama
-# set PRODRION_OLLAMA_MODEL=qwen2.5-coder in .env if you want it for codegen
-```
-
-**Standalone CLI:**
+**Standalone CLI** (never modifies your repo — it works on a temporary copy):
 
 ```bash
-cd repo-agent
-python main.py
-# prompts for a repo path and a goal; creates ./chroma_db on first run
+python repo-agent/main.py /path/to/repo "Checkout crashes when no coupon is applied" --out fix.patch
+cd /path/to/repo && git apply /path/to/fix.patch
 ```
 
-**As a service (for goal_to_repo_agent.py):**
+To let the agent run the repo's tests while it works, set
+`PRODRION_REPO_AGENT_SANDBOX=local` in `.env` (your machine, dev only) or
+`docker`.
+
+**As a service (SSE):**
 
 ```bash
 uvicorn repo_agent_server:app --port 7845     # terminal 3
-python goal_to_repo_agent.py                   # reads feedback -> goals -> patches
 ```
 
 The GitHub-issue creation path (`POST /repo-analysis`, the `analyze_repo` job)
@@ -240,13 +239,13 @@ stylesheet.
 
 | Symptom | Cause / fix |
 | --- | --- |
-| Feedback labels are all `General > Feedback > Uncategorized` | No taxonomy. Set `PRODRION_TAXONOMY_BOOTSTRAP_URL` or `POST /bootstrap-taxonomy?url=<docs URL>`. |
+| Feedback labels are all `General > Feedback > Uncategorized` | No taxonomy yet. It is learned automatically once a workspace has `PRODRION_TAXONOMY_AUTO_MIN_FEEDBACK` reviews (on the next `rebuild_buckets_tick`), or build it from a docs URL: `POST /me/taxonomy {"url": ...}` (dashboard) / `POST /bootstrap-taxonomy?url=...` (admin). |
 | Jobs stuck at `pending` | Worker not running. Start `python worker.py` or use `PRODRION_INLINE_WORKER=true`. |
 | Log line `LLM provider call failed` | Ollama not running / wrong model name. Check `ollama list` and `PRODRION_OLLAMA_MODEL`. |
 | `no such file` for `.env` values | Run the process from the repo root (that's where `.env` is read). |
 | `jira_ticket` always empty | Expected unless `PRODRION_LOAD_DEMO_DATA=true` or real Jira creds are set. |
 | Slow first request | Ollama is loading the model into RAM; subsequent calls are faster. |
-| Switched embed model after ingesting data | Old vectors are a different size. Wipe: delete `feedback_platform.db` (and `chroma_db/`) and re-ingest. |
+| Switched embed model after ingesting data | Old vectors are a different size. Wipe: delete `feedback_platform.db` and re-ingest. |
 
 ---
 
@@ -258,7 +257,7 @@ stylesheet.
 | Natural-language `/query` (text-to-SQL) | Ollama |
 | Taxonomy auto-build | Ollama + a docs URL |
 | Jira dedup / linking | `PRODRION_LOAD_DEMO_DATA=true` or real Jira creds |
-| repo-agent patch suggestions | Ollama + `chromadb`/`tree-sitter` (already in requirements) |
+| repo fix agent | the LLM provider + `tree-sitter` (already in requirements; used to syntax-check JS/TS/etc.) |
 | GitHub issue creation | a GitHub App (skip for local) |
 | Slack / Zendesk / App Store / Play Store polling | the respective credentials in `.env` |
 | Dashboard UI | a Supabase project |

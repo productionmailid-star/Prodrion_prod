@@ -1,3 +1,5 @@
+"""Directories the fix agent never lists, reads, searches or edits."""
+
 IGNORE_DIRS = {
     ".git",
     "__pycache__",
@@ -9,18 +11,12 @@ IGNORE_DIRS = {
     ".idea",
     ".vscode",
     ".next",
-    "target"
-}
-
-SUPPORTED_EXTENSIONS = {
-    ".py",
-    ".js",
-    ".ts",
-    ".tsx",
-    ".jsx",
-    ".java",
-    ".cpp",
-    ".c",
-    ".go",
-    ".rs"
+    "target",
+    ".tox",
+    ".eggs",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".gradle",
+    "site-packages",
 }

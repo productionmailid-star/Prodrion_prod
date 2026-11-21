@@ -16,7 +16,7 @@ Stack:
   - BeautifulSoup4              → taxonomy bootstrapper scraper
   - Slack SDK                   → alerts + per-workspace ingestion
   - google-play-scraper         → Play Store reviews
-  - app-store-scraper           → iOS reviews
+  - (none)                      → iOS reviews: Apple's public customer-reviews feed
 
 Install dependencies:
   pip install -r requirements.txt
@@ -74,6 +74,8 @@ from security import (
     require_workspace,
     verify_slack_signature,
     verify_webhook_secret,
+    verify_workspace_webhook_secret,
+    workspace_webhook_secret,
 )
 
 configure_logging()
@@ -303,9 +305,9 @@ def save_feedback(fb: StandardFeedbackObject):
             """
             INSERT INTO feedback
               (id, workspace_id, text, user_id, user_email, source, external_id,
-               timestamp, raw_meta, labels, sentiment, arr, plan_type,
+               timestamp, raw_meta, labels, primary_label, sentiment, arr, plan_type,
                jira_ticket, jira_status, embedding, embed_model)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(workspace_id, source, external_id) WHERE external_id IS NOT NULL
             DO NOTHING
             """,
@@ -314,6 +316,7 @@ def save_feedback(fb: StandardFeedbackObject):
                 fb.source, external_id, fb.timestamp,
                 json.dumps(fb.raw_meta),
                 json.dumps(fb.labels),
+                fb.labels[0] if fb.labels else None,
                 fb.sentiment,
                 fb.arr, fb.plan_type,
                 fb.jira_ticket, fb.jira_status,
@@ -341,6 +344,20 @@ def _replace_labels(conn: sqlite3.Connection, feedback_id: str, labels: list[str
 
 
 # ---- Component A: Polling Services ----------------------------------------
+
+# Sent on outbound fetches (connectors, taxonomy pages). Many sites reject the
+# default python-requests agent with a bot-block page.
+_HTTP_USER_AGENT = (
+    "Mozilla/5.0 (compatible; ProdrionBot/1.0; +https://prodrion.com/bot) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+)
+
+
+class ConnectorError(RuntimeError):
+    """A connector could not fetch from its source (bad credentials or app id,
+    source down, format change). poll_tick marks the hook as "error" so the
+    customer sees it, and keeps polling so it recovers on its own."""
+
 #
 # Each poll_* function is workspace-scoped: it takes that workspace's own
 # connector credentials (read from the dashboard's `hooks.config` via
@@ -366,8 +383,8 @@ def poll_zendesk(workspace_id: str, *, url: str, email: str, token: str) -> int:
         for t in tickets:
             created = t.get("created_at", "")
             if created > since:
-                enqueue_feedback(Normalizer.from_zendesk(t, workspace_id))
-                count += 1
+                if enqueue_feedback(Normalizer.from_zendesk(t, workspace_id)):
+                    count += 1
                 newest = max(newest, created)
         if newest != since:
             set_sync_cursor("zendesk", newest, workspace_id)
@@ -376,36 +393,80 @@ def poll_zendesk(workspace_id: str, *, url: str, email: str, token: str) -> int:
     except InsufficientCredits as exc:
         log.warning("Zendesk poll stopped: %s", exc)
         return 0
-    except Exception:
+    except Exception as exc:
         log.exception("Zendesk poll failed for workspace %s", workspace_id)
-        return 0
+        raise ConnectorError(f"Zendesk: {exc}") from exc
+
+
+_APP_STORE_FEED = (
+    "https://itunes.apple.com/{country}/rss/customerreviews/page={page}/id={app_id}"
+    "/sortby=mostrecent/json"
+)
+_APP_STORE_PAGES = 2  # 50 reviews per page, newest first
+
+
+def fetch_app_store_reviews(app_id: str, country: str = "us", pages: int = _APP_STORE_PAGES) -> list[dict]:
+    """Newest App Store reviews from Apple's public customer-reviews feed.
+
+    Returns dicts shaped for Normalizer.from_app_store. Raises ConnectorError
+    when Apple's feed can't be read (bad app id, network, format change), so
+    the dashboard can show the connector as failing instead of silently empty.
+    """
+    app_id = re.sub(r"^id", "", str(app_id).strip(), flags=re.IGNORECASE)
+    if not app_id.isdigit():
+        raise ConnectorError(f"App Store: app id must be numeric (got {app_id!r})")
+    reviews: list[dict] = []
+    for page in range(1, pages + 1):
+        url = _APP_STORE_FEED.format(country=country, page=page, app_id=app_id)
+        try:
+            resp = requests.get(url, timeout=30, headers={"User-Agent": _HTTP_USER_AGENT})
+            resp.raise_for_status()
+            feed = resp.json().get("feed", {})
+        except Exception as exc:
+            raise ConnectorError(f"App Store: could not read reviews for app {app_id}: {exc}") from exc
+        entries = feed.get("entry") or []
+        if isinstance(entries, dict):  # a single entry is not wrapped in a list
+            entries = [entries]
+        for entry in entries:
+            if "im:rating" not in entry:  # the first entry of page 1 can be the app itself
+                continue
+
+            def label(key, entry=entry):
+                value = entry.get(key) or {}
+                return value.get("label", "") if isinstance(value, dict) else ""
+
+            reviews.append(
+                {
+                    "review_id": label("id"),
+                    "title": label("title"),
+                    "content": label("content"),
+                    "rating": int(label("im:rating") or 0),
+                    "userName": (entry.get("author") or {}).get("name", {}).get("label", ""),
+                    "date": label("updated"),
+                    "version": label("im:version"),
+                }
+            )
+        if len(entries) < 50:
+            break
+    return reviews
 
 
 def poll_app_store(workspace_id: str, *, app_id: str, min_rating: int = 1) -> int:
     """Fetch recent iOS App Store reviews for one workspace's app."""
     if not app_id:
         return 0
+    reviews = fetch_app_store_reviews(app_id)
+    count = 0
     try:
-        from app_store_scraper import AppStore  # pip install app-store-scraper
-        app = AppStore(country="us", app_name="", app_id=app_id)
-        app.review(how_many=50)
-        count = 0
-        for review in app.reviews:
-            if int(review.get("rating", 5) or 5) < min_rating:
+        for review in reviews:
+            if int(review.get("rating") or 5) < min_rating:
                 continue
-            enqueue_feedback(Normalizer.from_app_store(review, workspace_id))
-            count += 1
-        log.info("App Store poll [%s]: ingested %d of %d reviews.", workspace_id, count, len(app.reviews))
-        return count
-    except ImportError:
-        log.warning("app-store-scraper not installed. Run: pip install app-store-scraper")
-        return 0
+            if enqueue_feedback(Normalizer.from_app_store(review, workspace_id)):
+                count += 1
     except InsufficientCredits as exc:
         log.warning("App Store poll stopped: %s", exc)
-        return 0
-    except Exception:
-        log.exception("App Store poll failed for workspace %s", workspace_id)
-        return 0
+    log.info("App Store poll [%s]: ingested %d new of %d reviews.", workspace_id, count, len(reviews))
+    return count
 
 
 def poll_play_store(workspace_id: str, *, app_id: str, min_rating: int = 1) -> int:
@@ -414,24 +475,22 @@ def poll_play_store(workspace_id: str, *, app_id: str, min_rating: int = 1) -> i
         return 0
     try:
         from google_play_scraper import Sort, reviews  # pip install google-play-scraper
+
         result, _ = reviews(app_id, lang="en", country="us", sort=Sort.NEWEST, count=50)
-        count = 0
+    except Exception as exc:
+        log.exception("Play Store poll failed for workspace %s", workspace_id)
+        raise ConnectorError(f"Play Store: could not read reviews for {app_id}: {exc}") from exc
+    count = 0
+    try:
         for review in result:
             if int(review.get("score", 5) or 5) < min_rating:
                 continue
-            enqueue_feedback(Normalizer.from_play_store(review, workspace_id))
-            count += 1
-        log.info("Play Store poll [%s]: ingested %d of %d reviews.", workspace_id, count, len(result))
-        return count
-    except ImportError:
-        log.warning("google-play-scraper not installed. Run: pip install google-play-scraper")
-        return 0
+            if enqueue_feedback(Normalizer.from_play_store(review, workspace_id)):
+                count += 1
     except InsufficientCredits as exc:
         log.warning("Play Store poll stopped: %s", exc)
-        return 0
-    except Exception:
-        log.exception("Play Store poll failed for workspace %s", workspace_id)
-        return 0
+    log.info("Play Store poll [%s]: ingested %d new of %d reviews.", workspace_id, count, len(result))
+    return count
 
 
 def poll_slack_channel(workspace_id: str, *, bot_token: str, channel_id: str) -> int:
@@ -450,22 +509,19 @@ def poll_slack_channel(workspace_id: str, *, bot_token: str, channel_id: str) ->
         for msg in messages:
             if msg.get("subtype"):        # skip bot/system messages
                 continue
-            enqueue_feedback(Normalizer.from_slack(msg, workspace_id))
-            ingested += 1
+            if enqueue_feedback(Normalizer.from_slack(msg, workspace_id)):
+                ingested += 1
             newest = max(newest, msg.get("ts", oldest))
         if newest != oldest:
             set_sync_cursor(state_key, newest, workspace_id)
         log.info("Slack poll [%s/%s]: ingested %d messages.", workspace_id, channel_id, ingested)
         return ingested
-    except ImportError:
-        log.warning("slack_sdk not installed. Run: pip install slack_sdk")
-        return 0
     except InsufficientCredits as exc:
         log.warning("Slack poll stopped: %s", exc)
         return 0
-    except Exception:
+    except Exception as exc:
         log.exception("Slack poll failed for workspace %s", workspace_id)
-        return 0
+        raise ConnectorError(f"Slack: {exc}") from exc
 
 
 # Star-rating filter understands the dashboard's sync_settings.min_star_rating
@@ -609,32 +665,14 @@ def normalize_taxonomy_nodes(data: dict):
 
 # ---- Component A: Bootstrapper --------------------------------------------
 
-def bootstrap_taxonomy_from_url(url: str, workspace_id: str | None = None):
-    """
-    Scrape a public URL (help docs / pricing page) and ask the LLM to build
-    a 3-level taxonomy. Stores results in the taxonomy table.
-    """
-    workspace_id = workspace_id or settings.default_workspace_id
-    if not is_safe_public_url(url):
-        log.error("Refusing to fetch taxonomy source %r: not a public http(s) URL.", url)
-        return
-    log.info(f"Bootstrapping taxonomy from: {url}")
-    try:
-        resp = requests.get(url, timeout=30)
-        soup = BeautifulSoup(resp.text, "html.parser")
-        # Extract readable text, skip nav/footer noise
-        for tag in soup(["script", "style", "nav", "footer", "header"]):
-            tag.decompose()
-        page_text = soup.get_text(separator=" ", strip=True)[:4000]
-    except Exception:
-        log.exception("Failed to scrape %s", url)
-        return
+class TaxonomyError(RuntimeError):
+    """The taxonomy could not be built; the message is safe to show the customer."""
 
-    prompt = f"""
-You are a product taxonomy expert.
 
-Given the following product documentation text, generate a 3-level hierarchical
-taxonomy of product features and areas. Return ONLY valid JSON in this exact format:
+_TAXONOMY_MIN_PAGE_CHARS = 300
+_TAXONOMY_MAX_NODES = 60
+
+_TAXONOMY_FORMAT = """Return ONLY valid JSON in this exact format:
 
 {{
   "taxonomy": [
@@ -648,34 +686,148 @@ taxonomy of product features and areas. Return ONLY valid JSON in this exact for
   ]
 }}
 
-Product text:
-{page_text}
+Rules:
+- 8 to 40 nodes. level1 = product area, level2 = feature, level3 = specific aspect.
+- Describe the PRODUCT the customers use (its features, flows and policies),
+  not the website, not this text's formatting, and not generic categories.
 """
+
+
+def _store_taxonomy(workspace_id: str, nodes: list[dict]) -> int:
+    nodes = [n for n in nodes if (n.get("level1") or "").strip()][:_TAXONOMY_MAX_NODES]
+    if not nodes:
+        raise TaxonomyError("the model did not return a usable taxonomy")
+    with get_conn() as conn:
+        conn.execute("DELETE FROM taxonomy WHERE workspace_id = ?", (workspace_id,))
+        for node in nodes:
+            conn.execute(
+                "INSERT INTO taxonomy (id, workspace_id, level1, level2, level3, description) "
+                "VALUES (?,?,?,?,?,?)",
+                (str(uuid.uuid4()), workspace_id, node["level1"].strip(),
+                 (node.get("level2") or "").strip() or None,
+                 (node.get("level3") or "").strip() or None, node.get("description")),
+            )  # fmt: skip
+    log.info("Taxonomy for workspace %s built with %d nodes.", workspace_id, len(nodes))
+    return len(nodes)
+
+
+def _taxonomy_from_llm(prompt: str) -> list[dict]:
     response = call_llm(prompt, expect_json=True)
     if not response:
-        log.error("No taxonomy response from LLM.")
-        return
+        raise TaxonomyError("the AI model did not respond; try again in a few minutes")
+    nodes = normalize_taxonomy_nodes(extract_json_from_llm(response))
+    if not nodes:
+        raise TaxonomyError("the AI model returned no product areas")
+    return nodes
 
+
+def fetch_page_text(url: str, max_chars: int = 6000) -> str:
+    """Readable text of a public page, or TaxonomyError explaining why not."""
+    if not is_safe_public_url(url):
+        raise TaxonomyError("the URL must be a public http(s) address")
     try:
-        data = extract_json_from_llm(response)
-        nodes = normalize_taxonomy_nodes(data)
+        resp = requests.get(
+            url, timeout=30, headers={"User-Agent": _HTTP_USER_AGENT, "Accept": "text/html"}
+        )
+    except requests.RequestException as exc:
+        raise TaxonomyError(f"could not load the page ({type(exc).__name__})") from exc
+    if resp.status_code != 200:
+        raise TaxonomyError(f"the page returned HTTP {resp.status_code}")
+    if "html" not in resp.headers.get("content-type", "html").lower():
+        raise TaxonomyError("the URL is not a web page")
+    soup = BeautifulSoup(resp.text, "html.parser")
+    for tag in soup(["script", "style", "nav", "footer", "header", "noscript"]):
+        tag.decompose()
+    text = soup.get_text(separator=" ", strip=True)
+    if len(text) < _TAXONOMY_MIN_PAGE_CHARS:
+        raise TaxonomyError(
+            "the page has too little readable text (it may need JavaScript or block bots); "
+            "try your help-center or features page"
+        )
+    return text[:max_chars]
 
-        if not nodes:
-            log.error("LLM returned empty or invalid taxonomy. Keeping existing taxonomy.")
-            return
 
+def bootstrap_taxonomy_from_url(url: str, workspace_id: str | None = None) -> int:
+    """Build a workspace's 3-level product taxonomy from its public docs /
+    help-center page. Replaces the existing taxonomy; returns the node count.
+
+    Raises TaxonomyError (the existing taxonomy is kept) when the page can't
+    be read or doesn't describe a product: a bot-block or error page must
+    never become the customer's product areas.
+    """
+    workspace_id = workspace_id or settings.default_workspace_id
+    log.info("Building taxonomy for %s from %s", workspace_id, url)
+    page_text = fetch_page_text(url)
+    nodes = _taxonomy_from_llm(f"""
+You are a product taxonomy expert.
+
+Below is text from a company's product documentation or help center. Build a
+3-level hierarchical taxonomy of the product's features and areas, which will
+be used to sort customer reviews by the part of the product they are about.
+
+If the text is NOT about a product (for example an error page, a login wall,
+a "please enable JavaScript" or bot-check page), return {{"taxonomy": []}}.
+
+{_TAXONOMY_FORMAT}
+Product text:
+{page_text}
+""")
+    return _store_taxonomy(workspace_id, nodes)
+
+
+def bootstrap_taxonomy_from_feedback(workspace_id: str, limit: int = 80) -> int:
+    """Build a taxonomy from the workspace's own reviews — the default for a
+    new customer who hasn't given a docs URL. Returns the node count."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT text FROM feedback WHERE workspace_id = ? AND text != '' "
+            "ORDER BY timestamp DESC LIMIT ?",
+            (workspace_id, limit),
+        ).fetchall()
+    texts = [row["text"].strip().replace("\n", " ")[:400] for row in rows if row["text"]]
+    if not texts:
+        raise TaxonomyError("no reviews yet to learn product areas from")
+    reviews = "\n".join(f"- {text}" for text in texts)
+    nodes = _taxonomy_from_llm(f"""
+You are a product taxonomy expert.
+
+Below are recent customer reviews of one product. Infer the product's areas
+and features from them and build a 3-level hierarchical taxonomy that will be
+used to sort these and future reviews by the part of the product they are
+about. Cover every area the reviews mention (including pricing, support and
+delivery if they come up), and use names general enough for future reviews.
+
+{_TAXONOMY_FORMAT}
+Customer reviews:
+{reviews}
+""")
+    return _store_taxonomy(workspace_id, nodes)
+
+
+def reclassify_workspace(workspace_id: str, limit: int = 500) -> int:
+    """Re-label a workspace's most recent feedback against its current
+    taxonomy (after the taxonomy is built or replaced). No credits are
+    charged: the customer already paid to ingest these. Returns the count."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM feedback WHERE workspace_id = ? ORDER BY timestamp DESC LIMIT ?",
+            (workspace_id, limit),
+        ).fetchall()
+    done = 0
+    for row in rows:
+        fb = StandardFeedbackObject(
+            text=row["text"], source=row["source"], workspace_id=workspace_id, id=row["id"]
+        )
+        labels, sentiment = classify_feedback(fb)
         with get_conn() as conn:
-            conn.execute("DELETE FROM taxonomy WHERE workspace_id = ?", (workspace_id,))
-            for node in nodes:
-                conn.execute(
-                    "INSERT INTO taxonomy (id, workspace_id, level1, level2, level3, description) "
-                    "VALUES (?,?,?,?,?,?)",
-                    (str(uuid.uuid4()), workspace_id, node.get("level1"), node.get("level2"),
-                     node.get("level3"), node.get("description")),
-                )
-        log.info(f"Taxonomy bootstrapped with {len(nodes)} nodes.")
-    except Exception:
-        log.exception("Taxonomy parse failed. Raw response: %s", response)
+            conn.execute(
+                "UPDATE feedback SET labels = ?, primary_label = ?, sentiment = ? WHERE id = ?",
+                (json.dumps(labels), labels[0] if labels else None, sentiment, row["id"]),
+            )
+            _replace_labels(conn, row["id"], labels)
+        done += 1
+    log.info("Reclassified %d feedback item(s) in workspace %s.", done, workspace_id)
+    return done
 
 
 def get_taxonomy_labels(workspace_id: str | None = None) -> list[str]:
@@ -720,6 +872,8 @@ Feedback text:
 Rules:
 - Return ONLY valid JSON: {{"labels": ["Label A", "Label B"], "sentiment": "negative"|"neutral"|"positive"}}
 - A single review can have MULTIPLE labels (multi-label classification).
+- Put the label for the review's MAIN problem FIRST; it decides which problem
+  bucket the review is counted in. Use only labels from the list above.
 - If nothing fits, use: {{"labels": ["General > Feedback > Uncategorized"], "sentiment": "neutral"}}
 - "sentiment" reflects whether the user is complaining/frustrated (negative), merely
   informational (neutral), or praising/satisfied (positive).
@@ -734,6 +888,15 @@ Rules:
         labels = data.get("labels")
         if not isinstance(labels, list) or not labels:
             labels = ["General > Feedback > Uncategorized"]
+        # Keep only real taxonomy labels (case-insensitively), in the model's
+        # order: an invented label would split one problem into many buckets.
+        known = {label.lower(): label for label in get_taxonomy_labels(fb.workspace_id)}
+        cleaned: list[str] = []
+        for label in labels:
+            match = known.get(str(label).strip().lower())
+            if match and match not in cleaned:
+                cleaned.append(match)
+        labels = cleaned or [UNCATEGORIZED_LABEL]
 
         sentiment = str(data.get("sentiment") or "neutral").lower()
         if sentiment not in _VALID_SENTIMENTS:
@@ -927,6 +1090,10 @@ def sync_hubspot_contacts(workspace_id: str | None = None):
 # ---- Component C: Revenue Aggregator --------------------------------------
 
 UNCATEGORIZED_LABEL = "General > Feedback > Uncategorized"
+
+# The label a review is bucketed under: its main problem (the classifier puts
+# it first). Older rows predate primary_label, so fall back to labels[0].
+_PRIMARY_LABEL_SQL = "COALESCE(f.primary_label, json_extract(f.labels, '$[0]'))"
 
 
 def get_revenue_impact_report(top_n: int = 20, workspace_id: str | None = None) -> list[dict]:
@@ -1385,12 +1552,13 @@ def taxonomy_exists(workspace_id: str | None = None) -> bool:
 
 def auto_bootstrap_taxonomy_if_needed(source: str, workspace_id: str | None = None):
     """
-    Build the taxonomy once, from the configured product docs URL, when the
-    taxonomy table is empty. Does nothing if PRODRION_TAXONOMY_BOOTSTRAP_URL
-    is not set.
+    Build the default workspace's taxonomy once, from the configured product
+    docs URL, when it is empty. PRODRION_TAXONOMY_BOOTSTRAP_URL describes the
+    operator's own product, so it is never applied to customer workspaces
+    (those build theirs from a URL they give, or from their own reviews).
     """
     workspace_id = workspace_id or settings.default_workspace_id
-    if taxonomy_exists(workspace_id):
+    if workspace_id != settings.default_workspace_id or taxonomy_exists(workspace_id):
         return
 
     if not settings.taxonomy_bootstrap_url:
@@ -1402,7 +1570,33 @@ def auto_bootstrap_taxonomy_if_needed(source: str, workspace_id: str | None = No
         return
 
     log.info("Taxonomy empty → auto-bootstrapping from %s", settings.taxonomy_bootstrap_url)
-    bootstrap_taxonomy_from_url(settings.taxonomy_bootstrap_url, workspace_id)
+    try:
+        bootstrap_taxonomy_from_url(settings.taxonomy_bootstrap_url, workspace_id)
+    except TaxonomyError as exc:
+        log.error("Taxonomy bootstrap from %s failed: %s", settings.taxonomy_bootstrap_url, exc)
+
+
+def ensure_taxonomy(workspace_id: str) -> bool:
+    """A new customer has no taxonomy, so every review would stay
+    "Uncategorized" and no bucket would ever form. Once enough reviews have
+    arrived, learn the product areas from them and re-label what's there.
+    Returns True when a taxonomy exists afterwards.
+    """
+    if taxonomy_exists(workspace_id):
+        return True
+    with get_conn() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM feedback WHERE workspace_id = ?", (workspace_id,)
+        ).fetchone()[0]
+    if count < settings.taxonomy_auto_min_feedback:
+        return False
+    try:
+        bootstrap_taxonomy_from_feedback(workspace_id)
+    except TaxonomyError as exc:
+        log.warning("Could not learn a taxonomy for %s from its reviews: %s", workspace_id, exc)
+        return False
+    reclassify_workspace(workspace_id)
+    return True
 
 # =============================================================================
 # THE PIPELINE: Wire all engines together
@@ -1426,8 +1620,10 @@ def pipeline(fb: StandardFeedbackObject) -> StandardFeedbackObject:
     return fb
 
 
-def enqueue_feedback(fb: StandardFeedbackObject) -> str:
-    """Charge credits and queue a feedback item; returns the job id.
+def enqueue_feedback(fb: StandardFeedbackObject) -> str | None:
+    """Charge credits and queue a feedback item; returns the job id, or None
+    when the item is already stored (connectors re-read their newest reviews
+    on every poll; a review is only ever charged once).
 
     The workspace charged is always ``fb.workspace_id`` — the single source
     of truth for which workspace this item belongs to (set by the Normalizer
@@ -1435,6 +1631,10 @@ def enqueue_feedback(fb: StandardFeedbackObject) -> str:
 
     Raises credits.InsufficientCredits when the workspace is out of credits.
     """
+    if fb.external_id:
+        with get_conn() as conn:
+            if _feedback_exists(conn, fb.workspace_id, fb.source, fb.external_id):
+                return None
     credits.charge(
         fb.workspace_id, settings.credits_per_feedback, "ingest_feedback", ref=fb.id
     )
@@ -1442,9 +1642,21 @@ def enqueue_feedback(fb: StandardFeedbackObject) -> str:
 
 
 def enqueue_repo_analysis(
-    installation_id: str, repo_full_name: str, goal: str, workspace_id: str | None = None
+    installation_id: str,
+    repo_full_name: str,
+    goal: str,
+    workspace_id: str | None = None,
+    *,
+    bucket_id: str | None = None,
+    bucket_label: str | None = None,
 ) -> str:
-    """Charge credits and queue a repo-analysis -> GitHub issue job."""
+    """Charge credits and queue a repo-analysis -> GitHub issue job.
+
+    When the job comes from a bucket, pass its id and label: the worker then
+    shows the agent the actual customer reports in that bucket and moves the
+    bucket's status as the job settles. The amount charged travels in the
+    payload so the worker can refund exactly that if no ticket is produced.
+    """
     workspace_id = workspace_id or settings.default_workspace_id
     credits.charge(
         workspace_id,
@@ -1459,6 +1671,11 @@ def enqueue_repo_analysis(
             "installation_id": installation_id,
             "repo_full_name": repo_full_name,
             "goal": goal,
+            "bucket_id": bucket_id,
+            "bucket_label": bucket_label,
+            "credits_charged": (
+                settings.credits_per_repo_analysis if settings.credits_enabled else 0
+            ),
         },
     )
 
@@ -1531,6 +1748,26 @@ def get_bucket_by_label(workspace_id: str, label: str) -> dict | None:
     return dict(row) if row else None
 
 
+def get_bucket_reports(workspace_id: str, label: str, limit: int = 8) -> list[str]:
+    """The most recent negative feedback texts filed under ``label`` — the
+    concrete symptoms the fix agent works from."""
+    if limit <= 0:
+        return []
+    with get_conn() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT f.text AS text
+            FROM feedback f
+            WHERE f.workspace_id = ? AND {_PRIMARY_LABEL_SQL} = ?
+              AND f.sentiment = 'negative'
+            ORDER BY f.timestamp DESC
+            LIMIT ?
+            """,
+            (workspace_id, label, limit),
+        ).fetchall()
+    return [row["text"] for row in rows if row["text"]]
+
+
 def set_bucket_status(workspace_id: str, bucket_id: str, status: str) -> None:
     with get_conn() as conn:
         conn.execute(
@@ -1538,6 +1775,115 @@ def set_bucket_status(workspace_id: str, bucket_id: str, status: str) -> None:
             "WHERE workspace_id = ? AND id = ?",
             (status, workspace_id, bucket_id),
         )
+
+
+_FIX_FIELDS = (
+    "fix_job_id", "fix_issue_url", "fix_issue_number", "fix_files", "fix_summary",
+    "fix_root_cause", "fix_diff", "fix_diff_hash", "fix_duplicate_of", "fix_error",
+)  # fmt: skip
+
+
+def set_bucket_fix(
+    workspace_id: str, bucket_id: str, *, status: str | None = None, reset: bool = False, **fields
+) -> None:
+    """Record the outcome of a "Generate fix" run on its bucket (what the
+    dashboard shows). ``reset`` clears the previous run's outcome first."""
+    unknown = set(fields) - set(_FIX_FIELDS)
+    if unknown:
+        raise ValueError(f"unknown bucket fix field(s): {sorted(unknown)}")
+    if "fix_files" in fields and not isinstance(fields["fix_files"], str):
+        fields["fix_files"] = json.dumps(list(fields["fix_files"] or []))
+    values = dict.fromkeys(_FIX_FIELDS) if reset else {}
+    values.update(fields)
+    assignments = [f"{name} = ?" for name in values] + ["fix_updated_at = datetime('now')"]
+    params = list(values.values())
+    if status is not None:
+        assignments.append("status = ?")
+        params.append(status)
+    with get_conn() as conn:
+        conn.execute(
+            f"UPDATE buckets SET {', '.join(assignments)}, updated_at = datetime('now') "
+            "WHERE workspace_id = ? AND id = ?",
+            (*params, workspace_id, bucket_id),
+        )
+
+
+def list_bucket_fixes(workspace_id: str) -> list[dict]:
+    """Every bucket with its "Generate fix" status and result, for the dashboard."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM buckets WHERE workspace_id = ? ORDER BY feedback_count DESC",
+            (workspace_id,),
+        ).fetchall()
+    out = []
+    for row in rows:
+        item = {
+            key: row[key]
+            for key in ("id", "label", "status", "feedback_count", "arr_impacted", "updated_at")
+        }
+        item.update(
+            issue_url=row["fix_issue_url"],
+            issue_number=row["fix_issue_number"],
+            files=json.loads(row["fix_files"]) if row["fix_files"] else [],
+            summary=row["fix_summary"],
+            root_cause=row["fix_root_cause"],
+            diff=row["fix_diff"],
+            duplicate_of=row["fix_duplicate_of"],
+            error=row["fix_error"],
+            fix_updated_at=row["fix_updated_at"],
+        )
+        out.append(item)
+    return out
+
+
+_HUNK = re.compile(r"^@@ -(\d+)(?:,\d+)? \+\d+(?:,\d+)? @@")
+
+
+def diff_footprint(diff: str) -> set[tuple[str, str]]:
+    """The original lines a unified diff changes: {(path, "-<line>") for
+    removed/replaced lines, (path, "+<line>") for insertion points}. Two fixes
+    that touch the same original lines are fixing the same code."""
+    footprint: set[tuple[str, str]] = set()
+    path, old_line = None, 0
+    for line in diff.splitlines():
+        if line.startswith("--- "):
+            path = None if line[4:].strip() == "/dev/null" else line[4:].strip().removeprefix("a/")
+        elif line.startswith("+++ "):
+            if path is None:  # new file: identify it by its new path
+                path = line[4:].strip().removeprefix("b/")
+        elif line.startswith("@@"):
+            match = _HUNK.match(line)
+            old_line = int(match.group(1)) if match else 0
+        elif path is None:
+            continue
+        elif line.startswith("-"):
+            footprint.add((path, f"-{old_line}"))
+            old_line += 1
+        elif line.startswith("+"):
+            footprint.add((path, f"+{old_line}"))
+        elif line.startswith(" ") or line == "":
+            old_line += 1
+    return footprint
+
+
+def find_duplicate_fix(workspace_id: str, bucket_id: str, diff: str) -> dict | None:
+    """Another bucket in this workspace whose ticket already makes this change
+    (one bug often shows up under two labels, e.g. "Payment errors" and
+    "Discount codes"). Returns that bucket, or None."""
+    footprint = diff_footprint(diff)
+    digest = hashlib.sha256(diff.strip().encode()).hexdigest()
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM buckets WHERE workspace_id = ? AND id != ? AND status = 'ticketed' "
+            "AND fix_issue_url IS NOT NULL AND fix_duplicate_of IS NULL",
+            (workspace_id, bucket_id),
+        ).fetchall()
+    for row in rows:
+        if row["fix_diff_hash"] == digest:
+            return dict(row)
+        if footprint and footprint & diff_footprint(row["fix_diff"] or ""):
+            return dict(row)
+    return None
 
 
 def rebuild_buckets(workspace_id: str | None = None) -> list[dict]:
@@ -1548,12 +1894,15 @@ def rebuild_buckets(workspace_id: str | None = None) -> list[dict]:
     workspace_id = workspace_id or settings.default_workspace_id
     with get_conn() as conn:
         rows = conn.execute(
-            """
-            SELECT fl.label AS label, COUNT(*) AS cnt, COALESCE(SUM(f.arr), 0) AS arr_sum
-            FROM feedback_labels fl
-            JOIN feedback f ON f.id = fl.feedback_id
-            WHERE f.workspace_id = ? AND f.sentiment = 'negative' AND fl.label != ?
-            GROUP BY fl.label
+            f"""
+            SELECT label, COUNT(*) AS cnt, COALESCE(SUM(arr), 0) AS arr_sum
+            FROM (
+                SELECT {_PRIMARY_LABEL_SQL} AS label, f.arr AS arr
+                FROM feedback f
+                WHERE f.workspace_id = ? AND f.sentiment = 'negative'
+            )
+            WHERE label IS NOT NULL AND label != ?
+            GROUP BY label
             """,
             (workspace_id, UNCATEGORIZED_LABEL),
         ).fetchall()
@@ -1627,20 +1976,42 @@ async def webhook_feedback(
     request: Request,
     x_webhook_secret: str | None = Header(default=None, alias="X-Webhook-Secret"),
 ):
-    """Generic webhook endpoint. Accepts any JSON payload. Requires X-Webhook-Secret.
+    """Operator webhook: feedback for the default (operator's own) workspace.
+    Requires the server's X-Webhook-Secret. Customers use their own
+    /webhook/feedback/{workspace_id} URL instead (see GET /me/webhook).
 
     The item is normalised and queued; the background worker runs the pipeline.
     """
     verify_webhook_secret(x_webhook_secret)
+    return await _ingest_webhook(request, settings.default_workspace_id)
+
+
+@app.post("/webhook/feedback/{workspace_id}", status_code=202)
+async def webhook_feedback_for_workspace(
+    workspace_id: str,
+    request: Request,
+    x_webhook_secret: str | None = Header(default=None, alias="X-Webhook-Secret"),
+):
+    """A customer's own webhook: feedback lands in, and is billed to, their
+    workspace. The secret is per-workspace (shown in the dashboard)."""
+    verify_workspace_webhook_secret(workspace_id, x_webhook_secret)
+    return await _ingest_webhook(request, workspace_id)
+
+
+async def _ingest_webhook(request: Request, workspace_id: str) -> dict:
     body = await _read_capped_body(request)
     try:
         payload = json.loads(body)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON payload.") from None
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="JSON payload must be an object.")
     try:
-        job_id = enqueue_feedback(Normalizer.from_webhook(payload))
+        job_id = enqueue_feedback(Normalizer.from_webhook(payload, workspace_id))
     except InsufficientCredits as exc:
         raise HTTPException(status_code=402, detail=str(exc)) from None
+    if job_id is None:
+        return {"status": "duplicate"}
     return {"status": "queued", "job_id": job_id}
 
 
@@ -1686,8 +2057,13 @@ async def bootstrap_taxonomy(url: str, workspace_id: str | None = None):
     """Scrape a URL and auto-generate the product taxonomy."""
     if not is_safe_public_url(url):
         raise HTTPException(status_code=400, detail="url must be a public http(s) URL")
-    bootstrap_taxonomy_from_url(url, workspace_id)
-    return {"status": "taxonomy bootstrapped", "url": url}
+    workspace_id = workspace_id or settings.default_workspace_id
+    try:
+        nodes = bootstrap_taxonomy_from_url(url, workspace_id)
+    except TaxonomyError as exc:
+        raise HTTPException(status_code=422, detail=f"taxonomy not built: {exc}") from None
+    jobs.enqueue("reclassify_workspace", {"workspace_id": workspace_id})
+    return {"status": "taxonomy bootstrapped", "url": url, "nodes": nodes}
 
 
 @app.get("/taxonomy", dependencies=_ADMIN)
@@ -1745,6 +2121,8 @@ async def my_repo_analysis(request: Request, workspace_id: str = Depends(require
     bucket = get_bucket_by_label(ws, str(label))
     if bucket is None:
         raise HTTPException(status_code=404, detail="bucket not found")
+    if bucket["status"] == "queued":
+        raise HTTPException(status_code=409, detail="a fix is already being generated for this")
 
     workspace = supabase_sync.get_workspace(ws) if supabase_sync.configured() else None
     installation_id = (workspace or {}).get("github_installation_id")
@@ -1757,13 +2135,89 @@ async def my_repo_analysis(request: Request, workspace_id: str = Depends(require
 
     try:
         job_id = enqueue_repo_analysis(
-            str(installation_id), repo_full_name, bucket["suggested_goal"], ws
+            str(installation_id),
+            repo_full_name,
+            bucket["suggested_goal"],
+            ws,
+            bucket_id=bucket["id"],
+            bucket_label=bucket["label"],
         )
     except InsufficientCredits as exc:
         raise HTTPException(status_code=402, detail=str(exc)) from None
 
-    set_bucket_status(ws, bucket["id"], "queued")
+    set_bucket_fix(ws, bucket["id"], status="queued", reset=True, fix_job_id=job_id)
     return {"status": "queued", "job_id": job_id, "label": label}
+
+
+@app.get("/me/fixes")
+async def my_fixes(workspace_id: str = Depends(require_workspace)):
+    """Every problem bucket with its "Generate fix" status and, when a fix was
+    made, the files to change, root cause, explanation, patch and ticket link."""
+    return {"workspace_id": workspace_id, "fixes": list_bucket_fixes(workspace_id)}
+
+
+@app.get("/me/webhook")
+async def my_webhook(workspace_id: str = Depends(require_workspace)):
+    """Where the signed-in customer posts feedback from their own systems.
+
+    With Supabase the secret is the workspace's "Webhook Secret" on the
+    dashboard's Keys page (not repeated here); without it, the derived one.
+    """
+    info = {"path": f"/webhook/feedback/{workspace_id}", "header": "X-Webhook-Secret"}
+    if supabase_sync.configured():
+        return {**info, "secret": None, "secret_location": "Keys -> Webhook Secret"}
+    secret = workspace_webhook_secret(workspace_id)
+    if secret is None:
+        raise HTTPException(status_code=503, detail="webhooks are not configured on this server")
+    return {**info, "secret": secret}
+
+
+@app.get("/me/taxonomy")
+async def my_taxonomy(workspace_id: str = Depends(require_workspace)):
+    """The product areas reviews are sorted into, and the last build attempt."""
+    labels = get_taxonomy_labels(workspace_id) if taxonomy_exists(workspace_id) else []
+    return {
+        "labels": labels,
+        "auto_build_after_reviews": settings.taxonomy_auto_min_feedback,
+        "last_build": _last_job("bootstrap_taxonomy", workspace_id),
+    }
+
+
+@app.post("/me/taxonomy", status_code=202)
+async def my_taxonomy_build(request: Request, workspace_id: str = Depends(require_workspace)):
+    """Build (or rebuild) the product areas from the customer's help-center or
+    docs URL, then re-sort their existing reviews. Runs in the background.
+
+    Body: {"url"}
+    """
+    body = json.loads(await _read_capped_body(request) or b"{}")
+    url = str(body.get("url") or "").strip()
+    if not is_safe_public_url(url):
+        raise HTTPException(status_code=400, detail="url must be a public http(s) URL")
+    job_id = jobs.enqueue(
+        "bootstrap_taxonomy", {"workspace_id": workspace_id, "url": url}, max_attempts=2
+    )
+    return {"status": "queued", "job_id": job_id}
+
+
+def _last_job(job_type: str, workspace_id: str) -> dict | None:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, payload, status, last_error, updated_at FROM jobs WHERE type = ? "
+            "ORDER BY created_at DESC LIMIT 50",
+            (job_type,),
+        ).fetchall()
+    for row in rows:
+        payload = json.loads(row["payload"])
+        if payload.get("workspace_id") == workspace_id:
+            return {
+                "job_id": row["id"],
+                "status": row["status"],
+                "url": payload.get("url"),
+                "error": row["last_error"],
+                "updated_at": row["updated_at"],
+            }
+    return None
 
 
 @app.post("/me/github/install-callback")
@@ -1773,13 +2227,51 @@ async def my_github_install_callback(
     """Record the GitHub App installation id for the signed-in user's workspace,
     after they complete the install flow on github.com.
 
-    Body: {"installation_id"}
+    Body: {"installation_id", "code"} — ``code`` is the OAuth code GitHub adds
+    to the redirect. It proves which GitHub user is linking, so nobody can
+    attach another organisation's installation (and so its repos) to their
+    own workspace by sending its id.
     """
+    import github_app
+
     body = json.loads(await _read_capped_body(request))
-    installation_id = body.get("installation_id")
-    if not installation_id:
+    installation_id = str(body.get("installation_id") or "").strip()
+    if not installation_id.isdigit():
         raise HTTPException(status_code=400, detail="installation_id is required")
-    supabase_sync.set_workspace_github_installation(workspace_id, str(installation_id))
+
+    if settings.github_app_client_id and settings.github_app_client_secret:
+        code = str(body.get("code") or "").strip()
+        if not code:
+            raise HTTPException(
+                status_code=400,
+                detail="GitHub sign-in is missing: reinstall the app from the dashboard",
+            )
+        try:
+            allowed = github_app.user_installation_ids(code)
+        except github_app.GitHubError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from None
+        if installation_id not in allowed:
+            raise HTTPException(
+                status_code=403,
+                detail="your GitHub account does not have access to this installation",
+            )
+    elif settings.is_production:  # pragma: no cover - blocked by config fail-fast
+        raise HTTPException(status_code=503, detail="GitHub sign-in is not configured")
+    else:
+        log.warning(
+            "GitHub App OAuth client id/secret not set: installation %s linked to %s "
+            "WITHOUT ownership verification (dev only).",
+            installation_id,
+            workspace_id,
+        )
+
+    owner = supabase_sync.workspace_for_installation(installation_id)
+    if owner and owner != workspace_id:
+        raise HTTPException(
+            status_code=409,
+            detail="this GitHub installation is already connected to another workspace",
+        )
+    supabase_sync.set_workspace_github_installation(workspace_id, installation_id)
     return {"status": "ok", "workspace_id": workspace_id}
 
 

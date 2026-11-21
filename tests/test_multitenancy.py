@@ -67,17 +67,46 @@ def test_chat_with_data_rejects_malformed_workspace_id(db):
 # --- sentiment-gated classification -------------------------------------
 
 
+def _taxonomy(workspace_id, *labels):
+    import uuid
+
+    with fp.get_conn() as conn:
+        for label in labels:
+            parts = (label.split(" > ") + [None, None])[:3]
+            conn.execute(
+                "INSERT INTO taxonomy (id, workspace_id, level1, level2, level3) VALUES (?,?,?,?,?)",
+                (uuid.uuid4().hex, workspace_id, *parts),
+            )
+
+
 def test_classify_feedback_returns_labels_and_sentiment(db, monkeypatch):
     from llm.fake import FakeLLM
 
+    _taxonomy(fp.settings.default_workspace_id, "Bug > Crash", "Billing > Invoice")
     monkeypatch.setattr(
         fp,
         "get_llm",
-        lambda: FakeLLM(canned='{"labels": ["Bug > Crash"], "sentiment": "negative"}'),
+        lambda: FakeLLM(
+            canned='{"labels": ["bug > crash", "Billing > Invoice"], "sentiment": "negative"}'
+        ),
     )
     labels, sentiment = fp.classify_feedback(_fb())
-    assert labels == ["Bug > Crash"]
+    assert labels == ["Bug > Crash", "Billing > Invoice"]  # canonical case, model's order
     assert sentiment == "negative"
+
+
+def test_classify_feedback_drops_labels_outside_the_taxonomy(db, monkeypatch):
+    """An invented label would split one problem across many buckets."""
+    from llm.fake import FakeLLM
+
+    _taxonomy(fp.settings.default_workspace_id, "Bug > Crash")
+    monkeypatch.setattr(
+        fp,
+        "get_llm",
+        lambda: FakeLLM(canned='{"labels": ["Checkout > Crashy"], "sentiment": "negative"}'),
+    )
+    labels, _ = fp.classify_feedback(_fb())
+    assert labels == ["General > Feedback > Uncategorized"]
 
 
 def test_classify_feedback_defaults_sentiment_on_bad_json(db, monkeypatch):

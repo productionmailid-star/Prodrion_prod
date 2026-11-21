@@ -111,7 +111,9 @@ def get_workspace_by_owner(user_id: str) -> dict | None:
 
 
 def list_connected_hooks(hook_type: str | None = None) -> list[dict]:
-    """Return every `hooks` row with status='connected', optionally filtered by type.
+    """Return every `hooks` row that should be polled — status 'connected', or
+    'error' (a failing connector keeps being retried so it recovers on its
+    own) — optionally filtered by type.
 
     Shape: [{id, workspace_id, type, config}], config already json-decoded.
     """
@@ -121,12 +123,13 @@ def list_connected_hooks(hook_type: str | None = None) -> list[dict]:
         if hook_type:
             cur.execute(
                 "SELECT id, workspace_id, type, config FROM hooks "
-                "WHERE status = 'connected' AND type = %s",
+                "WHERE status IN ('connected', 'error') AND type = %s",
                 (hook_type,),
             )
         else:
             cur.execute(
-                "SELECT id, workspace_id, type, config FROM hooks WHERE status = 'connected'"
+                "SELECT id, workspace_id, type, config FROM hooks "
+                "WHERE status IN ('connected', 'error')"
             )
         rows = cur.fetchall()
     out = []
@@ -203,6 +206,32 @@ def set_workspace_github_installation(workspace_id: str, installation_id: str) -
             (installation_id, workspace_id),
         )
         conn.commit()
+
+
+def get_webhook_secret(workspace_id: str) -> str | None:
+    """The workspace's own feedback-webhook secret (dashboard: Keys -> Webhook
+    Secret, rotatable by the customer), or None if it has none yet."""
+    if not configured():
+        return None
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT secret FROM webhook_secrets WHERE workspace_id = %s", (str(workspace_id),)
+        )
+        row = cur.fetchone()
+    return str(row[0]) if row and row[0] else None
+
+
+def workspace_for_installation(installation_id: str) -> str | None:
+    """The workspace a GitHub installation is already linked to, if any."""
+    if not configured():
+        return None
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT id FROM workspaces WHERE github_installation_id = %s LIMIT 1",
+            (str(installation_id),),
+        )
+        row = cur.fetchone()
+    return str(row[0]) if row else None
 
 
 def update_hook_sync_status(

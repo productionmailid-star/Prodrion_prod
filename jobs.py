@@ -22,6 +22,14 @@ log = logging.getLogger("prodrion.jobs")
 PENDING, RUNNING, DONE, FAILED, DEAD = "pending", "running", "done", "failed", "dead"
 
 
+class PermanentJobError(Exception):
+    """Raised by a handler when retrying cannot change the outcome.
+
+    The worker buries the job immediately instead of spending its remaining
+    attempts (and, for LLM-backed jobs, the model quota) on the same result.
+    """
+
+
 def enqueue(
     job_type: str,
     payload: dict,
@@ -96,14 +104,45 @@ def mark_done(job_id: str) -> None:
         )
 
 
-def mark_failed(job_id: str, error: str) -> None:
-    """Record a failure: reschedule with exponential backoff, or bury as `dead`."""
+class RetryLater(Exception):
+    """Raised by a handler that knows when a retry can succeed (e.g. the model
+    provider's quota resets in N hours). The job is rescheduled for then
+    instead of following the usual short exponential backoff."""
+
+    def __init__(self, delay_seconds: float, message: str = ""):
+        super().__init__(message or f"retry in {delay_seconds:.0f}s")
+        self.delay_seconds = float(delay_seconds)
+
+
+_MAX_RETRY_LATER_SECONDS = 24 * 3600.0
+
+
+def mark_dead(job_id: str, error: str) -> None:
+    """Bury a job with no further retries."""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE jobs SET status='dead', last_error=?, updated_at=datetime('now') WHERE id=?",
+            (error[:2000], job_id),
+        )
+    log.error("Job %s is DEAD (not retried): %s", job_id, error)
+
+
+def mark_failed(job_id: str, error: str, delay_seconds: float | None = None) -> str | None:
+    """Record a failure: reschedule with exponential backoff, or bury as `dead`.
+
+    ``delay_seconds`` replaces the backoff with an explicit wait (see
+    :class:`RetryLater`); the attempt still counts, so a job cannot be
+    postponed forever.
+
+    Returns the job's new status (``"pending"`` or ``"dead"``), or None if the
+    job no longer exists.
+    """
     with get_conn() as conn:
         row = conn.execute(
             "SELECT attempts, max_attempts FROM jobs WHERE id=?", (job_id,)
         ).fetchone()
         if row is None:
-            return
+            return None
         if row["attempts"] >= row["max_attempts"]:
             conn.execute(
                 "UPDATE jobs SET status='dead', last_error=?, "
@@ -111,13 +150,16 @@ def mark_failed(job_id: str, error: str) -> None:
                 (error[:2000], job_id),
             )
             log.error("Job %s is DEAD after %d attempts: %s", job_id, row["attempts"], error)
-            return
-        delay = int(
-            min(
-                settings.job_backoff_base_seconds * (2 ** (row["attempts"] - 1)),
-                settings.job_backoff_max_seconds,
+            return DEAD
+        if delay_seconds is not None:
+            delay = int(min(max(delay_seconds, 1.0), _MAX_RETRY_LATER_SECONDS))
+        else:
+            delay = int(
+                min(
+                    settings.job_backoff_base_seconds * (2 ** (row["attempts"] - 1)),
+                    settings.job_backoff_max_seconds,
+                )
             )
-        )
         conn.execute(
             """
             UPDATE jobs
@@ -133,6 +175,7 @@ def mark_failed(job_id: str, error: str) -> None:
             row["attempts"],
             delay,
         )
+        return PENDING
 
 
 def has_active(job_type: str, match: dict | None = None) -> bool:

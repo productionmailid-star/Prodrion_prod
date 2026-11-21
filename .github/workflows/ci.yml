@@ -25,7 +25,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install fastapi pydantic-settings numpy requests beautifulsoup4 \
-                      pyjwt cryptography \
+                      pyjwt cryptography tree-sitter tree-sitter-language-pack \
                       pytest pytest-asyncio httpx ruff black
 
       - name: Ruff (lint)
@@ -35,7 +35,7 @@ jobs:
         run: >-
           black --check tests/ config.py security.py db.py jobs.py worker.py
           observability.py credits.py github_app.py repo_agent_core.py
-          supabase_sync.py llm/
+          supabase_sync.py llm/ repo-agent/main.py repo-agent/agents/ repo-agent/repo/
 
       - name: Pytest
         run: pytest

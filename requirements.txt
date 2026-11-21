@@ -12,8 +12,8 @@ sentry-sdk>=2.0.0
 pyjwt>=2.8.0
 cryptography>=42.0.0
 
-# repo-agent code analysis (scan -> chunk -> index -> plan)
-chromadb>=0.4.0
+# repo fix agent: syntax verification of changed JS/TS/Java/Go/... files
+# (Python/JSON/TOML are checked with the standard library)
 tree-sitter>=0.21.0
 tree-sitter-language-pack>=0.1.0
 
@@ -38,7 +38,6 @@ beautifulsoup4>=4.12.0
 
 # Source ingestion (all free-tier / open-source)
 google-play-scraper>=1.2.7
-app-store-scraper>=0.3.5
 slack_sdk>=3.27.0
 
 # Optional: Jira integration

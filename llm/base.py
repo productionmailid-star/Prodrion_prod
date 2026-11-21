@@ -35,6 +35,39 @@ class LLMProvider(ABC):
             return prefill + out
         return out
 
+    def retry_after_seconds(self, exc: Exception) -> float | None:
+        """How long the provider asked us to wait after ``exc``, if it said.
+
+        Lets callers tell a brief rate limit (wait and retry) from an exhausted
+        daily quota (stop now and come back later). None means "unknown".
+        """
+        return None
+
+    def converse(
+        self,
+        system: str,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.1,
+        json_mode: bool = False,
+    ) -> str:
+        """Multi-turn completion, used by the repo fix agent's tool loop.
+
+        ``messages`` is the running transcript, oldest first:
+        ``[{"role": "user" | "assistant", "content": str}, ...]``, ending with a
+        user turn. ``json_mode`` asks the provider to constrain the reply to a
+        JSON document where it can; callers must still parse defensively.
+
+        The default implementation flattens the transcript into one prompt so
+        every provider works; providers with native multi-turn support override.
+        """
+        parts = []
+        for message in messages:
+            speaker = "ASSISTANT" if message["role"] == "assistant" else "USER"
+            parts.append(f"### {speaker}\n{message['content']}")
+        parts.append("### ASSISTANT")
+        return self.generate("\n\n".join(parts), system=system, temperature=temperature)
+
 
 class Embedder(ABC):
     """Vector embeddings."""
